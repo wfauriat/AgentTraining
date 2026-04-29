@@ -2,6 +2,7 @@ from unittest.mock import patch, MagicMock
 
 from tools.meta import get_current_time
 from tools.web import web_search, web_fetch, dispatch
+from tools.files import read_file, safe_path
 from config import MAX_TOOL_RESULT_TOKENS
 
 def test_get_current_time_returns_string():
@@ -53,13 +54,40 @@ def test_dispatch_unknown_tool_returns_error():
     result = dispatch("nonexistent_tool", {})
     assert "error" in result.lower()
 
+def test_safe_path_rejects_dangerous_patterns():
+    dangerous = [
+        "../etc/passwd",                 # parent traversal
+        "../../etc/passwd",              # multiple parents
+        "/etc/passwd",                   # absolute path (joining replaces base)
+        "notes/../../../etc/passwd",     # traversal hidden after safe prefix
+        "./../../etc/passwd",            # current-dir prefix doesn't help
+        "subdir/../../outside.txt",      # escapes after a real subdir
+    ]
+    for path in dangerous:
+        result = safe_path(path)
+        assert result is None, f"safe_path failed to reject: {path!r} -> {result}"
+
+
+def test_safe_path_accepts_legitimate_paths():
+    legitimate = [
+        "notes.txt",
+        "subdir/notes.txt",
+        "deeply/nested/path/file.md",
+        "notes/../notes.txt",     # technically uses .. but resolves inside
+    ]
+    for path in legitimate:
+        result = safe_path(path)
+        assert result is not None, f"safe_path wrongly rejected: {path!r}"
+
 def main():
     tests = [
         test_get_current_time_returns_string,
         test_web_search_formats_results,
         test_web_search_handles_empty_results,
         test_web_fetch_truncates_long_content,
-        test_dispatch_unknown_tool_returns_error
+        test_dispatch_unknown_tool_returns_error,
+        test_safe_path_rejects_dangerous_patterns,
+        test_safe_path_accepts_legitimate_paths   
     ]
     
     passed = failed = 0
