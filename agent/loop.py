@@ -3,7 +3,7 @@
 # dispatching tools, and knowing when to stop.
 
 import httpx
-from config import MODEL, OLLAMA_URL, MAX_TURNS
+from config import MODEL, OLLAMA_URL, MAX_TURNS, MODEL_TIMEOUT
 
 
 def run(messages: list, tools: list, dispatch_table: dict) -> str:
@@ -11,22 +11,26 @@ def run(messages: list, tools: list, dispatch_table: dict) -> str:
     Run the agent loop for one user turn.
 
     Sends the current message history to the model, handles any
-    tool calls, and returns the final text reply. Raises if the
-    model doesn't produce a text reply within MAX_TURNS.
+    tool calls, and returns the final text reply. Returns an
+    error string if MAX_TURNS is reached or the model call fails.
     """
     for turn in range(MAX_TURNS):
         # — Send current history to the model —
-        response = httpx.post(
-            OLLAMA_URL,
-            json={
-                "model": MODEL,
-                "messages": messages,
-                "stream": False,
-                "tools": tools,
-            },
-            timeout=120,
-        )
-        response.raise_for_status()
+        try:
+            response = httpx.post(
+                OLLAMA_URL,
+                json={
+                    "model": MODEL,
+                    "messages": messages,
+                    "stream": False,
+                    "tools": tools,
+                },
+                timeout=MODEL_TIMEOUT,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            return f"[agent error: model call failed — {e}]"
+
         payload = response.json()["message"]
 
         # — Branch: tool call or final text reply? —

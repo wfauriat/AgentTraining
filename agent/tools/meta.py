@@ -8,7 +8,6 @@ def get_current_time() -> str:
 
 
 # Tool schema sent to Ollama.
-# Each tool is described so the model knows when and how to call it.
 TOOLS = [
     {
         "type": "function",
@@ -23,7 +22,6 @@ TOOLS = [
         },
     }
 ]
-
 
 def dispatch(tool_name: str, arguments: dict) -> str:
     """

@@ -7,17 +7,20 @@ import loop
 
 SYSTEM_PROMPT = "You are a helpful assistant running locally on the user's machine."
 
-tools = meta.TOOLS + web.TOOLS
-dispatch_table = {
-    "get_current_time": meta.dispatch,
-    "web_search": web.dispatch,
-    "web_fetch": web.dispatch
-}
 
 def main():
+    # Tool wiring: schema list goes to the model, dispatch table to the loop.
+    # When you add a new tool module, register it in both places.
+    tools = meta.TOOLS + web.TOOLS
+    dispatch_table = {
+        "get_current_time": meta.dispatch,
+        "web_search":       web.dispatch,
+        "web_fetch":        web.dispatch,
+    }
+
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    print(f"Agent ready. Type 'quit' to exit.\n")
+    print("Agent ready. Type 'quit' to exit.\n")
 
     while True:
         query = input("You: ").strip()

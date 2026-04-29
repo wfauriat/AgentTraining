@@ -1,3 +1,10 @@
 .env
 __pycache__/
 *.pyc
+.venv/
+venv/
+.venvDS/
+workspace/
+*.log
+*.jsonl
+.DS_Store
