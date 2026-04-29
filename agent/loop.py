@@ -1,0 +1,58 @@
+# loop.py — the agent loop
+# Responsible for: sending messages, detecting tool calls,
+# dispatching tools, and knowing when to stop.
+
+import httpx
+from config import MODEL, OLLAMA_URL, MAX_TURNS
+
+
+def run(messages: list, tools: list, dispatch_table: dict) -> str:
+    """
+    Run the agent loop for one user turn.
+
+    Sends the current message history to the model, handles any
+    tool calls, and returns the final text reply. Raises if the
+    model doesn't produce a text reply within MAX_TURNS.
+    """
+    for turn in range(MAX_TURNS):
+        # — Send current history to the model —
+        response = httpx.post(
+            OLLAMA_URL,
+            json={
+                "model": MODEL,
+                "messages": messages,
+                "stream": False,
+                "tools": tools,
+            },
+            timeout=120,
+        )
+        response.raise_for_status()
+        payload = response.json()["message"]
+
+        # — Branch: tool call or final text reply? —
+        if payload.get("tool_calls"):
+            # Append the model's tool call to history first
+            messages.append(payload)
+
+            # Handle every tool call in the response (model may request several)
+            for call in payload["tool_calls"]:
+                tool_name = call["function"]["name"]
+                arguments = call["function"].get("arguments", {})
+
+                print(f"  [tool call: {tool_name}({arguments})]")
+                if tool_name not in dispatch_table:
+                    result = f"[error: unknown tool '{tool_name}']"
+                else:
+                    result = dispatch_table[tool_name](tool_name, arguments)
+
+                # Append tool result — model reads this on the next turn
+                messages.append({"role": "tool", "content": result})
+
+        else:
+            # Model produced a text reply — we're done for this turn
+            reply = payload["content"]
+            messages.append({"role": "assistant", "content": reply})
+            return reply
+
+    # Reached turn limit without a text reply
+    return f"[agent stopped: reached {MAX_TURNS}-turn limit]"
