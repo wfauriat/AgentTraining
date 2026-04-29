@@ -3,6 +3,7 @@ from unittest.mock import patch, MagicMock
 from tools.meta import get_current_time
 from tools.web import web_search, web_fetch, dispatch
 from tools.files import read_file, safe_path
+from tools.python import run_python
 from config import MAX_TOOL_RESULT_TOKENS
 
 def test_get_current_time_returns_string():
@@ -54,6 +55,10 @@ def test_dispatch_unknown_tool_returns_error():
     result = dispatch("nonexistent_tool", {})
     assert "error" in result.lower()
 
+def test_read_file_rejects_traversal():
+    result = read_file("../etc/passwd")
+    assert "error" in result.lower() or "forbidden" in result.lower()
+
 def test_safe_path_rejects_dangerous_patterns():
     dangerous = [
         "../etc/passwd",                 # parent traversal
@@ -79,6 +84,10 @@ def test_safe_path_accepts_legitimate_paths():
         result = safe_path(path)
         assert result is not None, f"safe_path wrongly rejected: {path!r}"
 
+def test_python_in_sandbox():
+    testcode = "print(1+1)"
+    assert "2" in run_python(testcode)
+
 def main():
     tests = [
         test_get_current_time_returns_string,
@@ -86,8 +95,10 @@ def main():
         test_web_search_handles_empty_results,
         test_web_fetch_truncates_long_content,
         test_dispatch_unknown_tool_returns_error,
+        test_read_file_rejects_traversal,
         test_safe_path_rejects_dangerous_patterns,
-        test_safe_path_accepts_legitimate_paths   
+        test_safe_path_accepts_legitimate_paths,
+        test_python_in_sandbox
     ]
     
     passed = failed = 0

@@ -29,7 +29,7 @@ def write_file(filepath: str, content: str) -> str:
     try:
         with open(safepath, "w", encoding="utf-8") as file:
             file.write(content)
-            return f"Content successfuly written in file {safepath}" 
+        return f"Content successfully written in file {safepath}"
     except Exception as e:
         return f"[error writing file: {e}]"
 
