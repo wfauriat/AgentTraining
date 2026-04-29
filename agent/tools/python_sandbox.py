@@ -1,21 +1,28 @@
 import subprocess
 
+from config import TOOL_TIMEOUT
+
 def run_python(code: str) -> str:
-    result = subprocess.run(
-        [
-            "docker", "run", "--rm", "-i",
-            "--network", "none",
-            "--memory", "256m",
-            "--cpus", "0.5",
-            "--read-only",
-            "python:3.11-slim",
-            "python", "-",
-        ],
-        input=code,                  # pipe code to stdin
-        capture_output=True,         # capture stdout/stderr
-        text=True,                   # strings, not bytes
-        timeout=30,                  # kill after 30s
-    )
+    try:
+        result = subprocess.run(
+            [
+                "docker", "run", "--rm", "-i",
+                "--network", "none",
+                "--memory", "256m",
+                "--cpus", "0.5",
+                "--read-only",
+                "python:3.11-slim",
+                "python", "-",
+            ],
+            input=code,                  # pipe code to stdin
+            capture_output=True,         # capture stdout/stderr
+            text=True,                   # strings, not bytes
+            timeout=TOOL_TIMEOUT,        # kill after 30s
+        )
+    except subprocess.TimeoutExpired:
+        return "[error: code execution timed out after 30 seconds]"
+    except Exception as e:
+        return f"[error: {e}]"
 
     output = ""
     if result.stdout:

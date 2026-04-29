@@ -3,7 +3,7 @@ from unittest.mock import patch, MagicMock
 from tools.meta import get_current_time
 from tools.web import web_search, web_fetch, dispatch
 from tools.files import read_file, safe_path
-from tools.python import run_python
+from tools.python_sandbox import run_python
 from config import MAX_TOOL_RESULT_TOKENS
 
 def test_get_current_time_returns_string():
