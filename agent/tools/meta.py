@@ -1,16 +1,31 @@
 # tools/meta.py — trivial utility tools
 from datetime import datetime
 
+from pydantic import BaseModel, Field, ValidationError
+
+
+# ── Argument schemas ───────────────────────────────────────────────────────
+# Each tool's inputs are described once as a Pydantic model. The dispatcher
+# uses it to validate before calling the tool function. If validation fails,
+# we return a string the model can read and recover from.
+
+class FinishArgs(BaseModel):
+    message: str = Field(..., description="The final message once the task is finished.")
+
+
+# ── Tool implementations ───────────────────────────────────────────────────
 
 def get_current_time() -> str:
     """Returns the current date and time."""
     return datetime.now().isoformat()
 
+
 def finish(message: str) -> str:
     return message
 
 
-# Tool schema sent to Ollama.
+# ── Schema sent to Ollama ──────────────────────────────────────────────────
+
 TOOLS = [
     {
         "type": "function",
@@ -33,30 +48,23 @@ TOOLS = [
                 "Pass a final summary message to show to the user. "
                 "Calling this tool ends the conversation turn."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description" : "The final message once the task is finished."
-                    }
-                },
-                "required": ["message"],
-            },
+            "parameters": FinishArgs.model_json_schema(),
         },
-    }
+    },
 ]
 
+
+# ── Dispatch ───────────────────────────────────────────────────────────────
+
 def dispatch(tool_name: str, arguments: dict) -> str:
-    """
-    Execute a tool by name and return its result as a string.
-    Returns an error string if the tool is unknown — the model
-    will see this and can recover gracefully.
-    """
     if tool_name == "get_current_time":
         return get_current_time()
+
     if tool_name == "finish":
-        message = arguments.get("message", "")
-        return finish(message)
+        try:
+            args = FinishArgs(**arguments)
+        except ValidationError as e:
+            return f"[error: invalid arguments for finish — {e}]"
+        return finish(args.message)
 
     return f"[error: unknown tool '{tool_name}']"

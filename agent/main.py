@@ -2,6 +2,7 @@
 # Owns: user input, printing, conversation history across turns.
 # Delegates everything else to loop.run().
 
+import observability as obs
 from tools import meta, web, files, python_sandbox, docs
 import loop
 
@@ -25,12 +26,13 @@ def main():
         "write_file":       files.dispatch,
         "run_python":       python_sandbox.dispatch,
         "search_documents": docs.dispatch,
-        "finish":           meta.dispatch
+        "finish":           meta.dispatch,
     }
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    log_path = obs.start_session()
+    print(f"Agent ready. Logging to {log_path}. Type 'quit' to exit.\n")
 
-    print("Agent ready. Type 'quit' to exit.\n")
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     while True:
         query = input("You: ").strip()
@@ -42,9 +44,11 @@ def main():
         if not query:
             continue
 
+        obs.log_user_message(query)
         messages.append({"role": "user", "content": query})
 
         reply = loop.run(messages, tools, dispatch_table)
+        obs.log_agent_reply(reply)
         print(f"\nAssistant: {reply}\n")
 
 

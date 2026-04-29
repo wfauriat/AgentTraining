@@ -2,7 +2,11 @@
 # Responsible for: sending messages, detecting tool calls,
 # dispatching tools, and knowing when to stop.
 
+import time
+
 import httpx
+
+import observability as obs
 from config import MODEL, OLLAMA_URL, MAX_TURNS, MODEL_TIMEOUT
 
 
@@ -16,6 +20,7 @@ def run(messages: list, tools: list, dispatch_table: dict) -> str:
     """
     for turn in range(MAX_TURNS):
         # — Send current history to the model —
+        t0 = time.time()
         try:
             response = httpx.post(
                 OLLAMA_URL,
@@ -32,6 +37,7 @@ def run(messages: list, tools: list, dispatch_table: dict) -> str:
             return f"[agent error: model call failed — {e}]"
 
         payload = response.json()["message"]
+        obs.log_model_call(messages, time.time() - t0, payload)
 
         # — Branch: tool call or final text reply? —
         if payload.get("tool_calls"):
@@ -45,13 +51,17 @@ def run(messages: list, tools: list, dispatch_table: dict) -> str:
 
                 if tool_name == "finish":
                     print(f"  [tool call: {tool_name}({arguments})]")
-                    return arguments.get("message", "[agent finished]")
+                    final = arguments.get("message", "[agent finished]")
+                    obs.log_tool_call(tool_name, arguments, final, 0.0)
+                    return final
 
                 print(f"  [tool call: {tool_name}({arguments})]")
+                t1 = time.time()
                 if tool_name not in dispatch_table:
                     result = f"[error: unknown tool '{tool_name}']"
                 else:
                     result = dispatch_table[tool_name](tool_name, arguments)
+                obs.log_tool_call(tool_name, arguments, result, time.time() - t1)
 
                 # Append tool result — model reads this on the next turn
                 messages.append({"role": "tool", "content": result})

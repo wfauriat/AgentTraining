@@ -1,13 +1,25 @@
 # tools/docs.py — RAG over the local indexed corpus
 import lancedb
+from pydantic import BaseModel, Field, ValidationError
 
-# Same constants as the indexer — keep them aligned!
 from config import DB_PATH, TABLE_NAME, TOP_K, DEBUG
-
 from tools.embedding import embed_text
+
+
+# ── Argument schemas ───────────────────────────────────────────────────────
+
+class SearchDocumentsArgs(BaseModel):
+    query: str = Field(..., min_length=1, description="A natural-language question or topic to search for.")
+
+
+# ── Lazy DB connection ─────────────────────────────────────────────────────
+# Connect on first use, not at import time. This means the agent can start
+# even if the index hasn't been built yet — search_documents just returns
+# a clean error message.
 
 _db = None
 _table = None
+
 
 def _get_table():
     global _db, _table
@@ -17,20 +29,27 @@ def _get_table():
     return _table
 
 
+# ── Tool implementation ────────────────────────────────────────────────────
+
 def search_documents(query: str) -> str:
     try:
-        _table = _get_table()
+        table = _get_table()
         prefixed_query = f"search_query: {query}"
         query_vector = embed_text(prefixed_query)
-        results = _table.search(query_vector).distance_type("cosine").limit(TOP_K).to_pandas()  # type: ignore[attr-defined]
+        results = (
+            table.search(query_vector)
+            .distance_type("cosine")  # type: ignore[attr-defined]
+            .limit(TOP_K)
+            .to_pandas()
+        )
     except FileNotFoundError:
         return "[error: vector index not found — run scripts/index_docs.py first]"
     except Exception as e:
         return f"[error: search_documents failed — {e}]"
-    
+
     if results.empty:
         return "[search_documents: no results found]"
-    
+
     if DEBUG:
         print(f"  [debug] retrieved chunks for '{query}':")
         for i in range(len(results)):
@@ -45,6 +64,8 @@ def search_documents(query: str) -> str:
     return "\n".join(lines)
 
 
+# ── Schema sent to Ollama ──────────────────────────────────────────────────
+
 TOOLS = [
     {
         "type": "function",
@@ -55,26 +76,20 @@ TOOLS = [
                 "Returns the top relevant text chunks with their section headings. "
                 "Use this for questions about topics covered in the local corpus."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "A natural-language question or topic to search for.",
-                    }
-                },
-                "required": ["query"],
-            },
+            "parameters": SearchDocumentsArgs.model_json_schema(),
         },
     }
 ]
 
 
+# ── Dispatch ───────────────────────────────────────────────────────────────
+
 def dispatch(tool_name: str, arguments: dict) -> str:
     if tool_name == "search_documents":
-        query = arguments.get("query", "")
-        if not query:
-            return "[error: search_documents requires a query argument]"
-        return search_documents(query)
+        try:
+            args = SearchDocumentsArgs(**arguments)
+        except ValidationError as e:
+            return f"[error: invalid arguments for search_documents — {e}]"
+        return search_documents(args.query)
 
     return f"[error: unknown tool '{tool_name}']"

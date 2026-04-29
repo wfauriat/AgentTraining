@@ -1,6 +1,18 @@
+# tools/python_sandbox.py — Python execution inside a Docker container
 import subprocess
 
+from pydantic import BaseModel, Field, ValidationError
+
 from config import TOOL_TIMEOUT
+
+
+# ── Argument schemas ───────────────────────────────────────────────────────
+
+class RunPythonArgs(BaseModel):
+    code: str = Field(..., min_length=1, description="The Python code to execute as a script.")
+
+
+# ── Tool implementation ────────────────────────────────────────────────────
 
 def run_python(code: str) -> str:
     try:
@@ -14,13 +26,13 @@ def run_python(code: str) -> str:
                 "python:3.11-slim",
                 "python", "-",
             ],
-            input=code,                  # pipe code to stdin
-            capture_output=True,         # capture stdout/stderr
-            text=True,                   # strings, not bytes
-            timeout=TOOL_TIMEOUT,        # kill after 30s
+            input=code,
+            capture_output=True,
+            text=True,
+            timeout=TOOL_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
-        return "[error: code execution timed out after 30 seconds]"
+        return f"[error: code execution timed out after {TOOL_TIMEOUT} seconds]"
     except Exception as e:
         return f"[error: {e}]"
 
@@ -29,9 +41,10 @@ def run_python(code: str) -> str:
         output += result.stdout
     if result.stderr:
         output += f"\n[stderr]\n{result.stderr}"
-
     return output or "[ran with no output]"
 
+
+# ── Schema sent to Ollama ──────────────────────────────────────────────────
 
 TOOLS = [
     {
@@ -46,26 +59,20 @@ TOOLS = [
                 "content as code arguments. The sandbox also has no network. State does "
                 "not persist between calls."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "The code to be executed by python as a script in a single string.",
-                    }
-                },
-                "required": ["code"],
-            },
+            "parameters": RunPythonArgs.model_json_schema(),
         },
     }
 ]
 
+
+# ── Dispatch ───────────────────────────────────────────────────────────────
+
 def dispatch(tool_name: str, arguments: dict) -> str:
     if tool_name == "run_python":
-        code = arguments.get("code", "")
-        if not code:
-            return "[error: run_python requires a code argument]"
-        return run_python(code)
+        try:
+            args = RunPythonArgs(**arguments)
+        except ValidationError as e:
+            return f"[error: invalid arguments for run_python — {e}]"
+        return run_python(args.code)
 
     return f"[error: unknown tool '{tool_name}']"
-
