@@ -12,3 +12,16 @@ TOOL_TIMEOUT = 30
 TAVILY_URL = "https://api.tavily.com/search"
 
 WORKSPACE_DIR = "./workspace"   # filesystem sandbox root
+
+
+DB_PATH = "./vector_db"
+EMBED_MODEL = "nomic-embed-text"
+OLLAMA_EMBED_URL = "http://localhost:11434/api/embeddings"
+
+CORPUS_PATH = "./corpus/biology.md"
+TABLE_NAME = "course"
+TARGET_CHUNK_CHARS = 2000
+TOP_K = 5
+
+
+DEBUG = False
