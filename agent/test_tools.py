@@ -6,6 +6,7 @@ from tools.files import read_file, safe_path
 from tools.python_sandbox import run_python
 from config import MAX_TOOL_RESULT_TOKENS
 
+
 def test_get_current_time_returns_string():
     assert isinstance(get_current_time(), str)
   

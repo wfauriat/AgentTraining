@@ -43,6 +43,10 @@ def run(messages: list, tools: list, dispatch_table: dict) -> str:
                 tool_name = call["function"]["name"]
                 arguments = call["function"].get("arguments", {})
 
+                if tool_name == "finish":
+                    print(f"  [tool call: {tool_name}({arguments})]")
+                    return arguments.get("message", "[agent finished]")
+
                 print(f"  [tool call: {tool_name}({arguments})]")
                 if tool_name not in dispatch_table:
                     result = f"[error: unknown tool '{tool_name}']"
@@ -55,6 +59,8 @@ def run(messages: list, tools: list, dispatch_table: dict) -> str:
         else:
             # Model produced a text reply — we're done for this turn
             reply = payload["content"]
+            if not reply.strip():
+                continue  # keep going, model just produced filler
             messages.append({"role": "assistant", "content": reply})
             return reply
 
