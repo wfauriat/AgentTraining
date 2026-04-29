@@ -7,8 +7,6 @@ MODEL_TIMEOUT = 120             # seconds per model call (first call loads weigh
 MAX_TOOL_RESULT_TOKENS = 4000   # truncate large tool outputs
 MAX_CONTEXT_TOKENS = 16000      # leave headroom on model window
 
-TOOL_TIMEOUT = 30
-
 TAVILY_URL = "https://api.tavily.com/search"
 
 WORKSPACE_DIR = "./workspace"   # filesystem sandbox root

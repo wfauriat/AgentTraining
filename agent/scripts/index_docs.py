@@ -1,13 +1,10 @@
 # scripts/index_docs.py
 import re
-import httpx
 import lancedb
-
-import numpy as np
 
 from tools.embedding import embed_text
 
-from config import CORPUS_PATH, DB_PATH, TABLE_NAME, EMBED_MODEL, OLLAMA_EMBED_URL, TARGET_CHUNK_CHARS
+from config import CORPUS_PATH, DB_PATH, TABLE_NAME, EMBED_MODEL, TARGET_CHUNK_CHARS
 
 def load_markdown(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
