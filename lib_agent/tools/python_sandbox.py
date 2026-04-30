@@ -26,6 +26,9 @@ def run_python(code: str) -> str:
       - NO network access. No HTTP, no DNS.
       - State does NOT persist across calls — each call is a fresh container.
       - Hard limits: 256 MB memory, 0.5 CPU, 30 s wall clock.
+      - Multi-line code MUST use real newlines, NOT escape sequences. Do not
+        emit `\\n` between statements; emit actual line breaks. Wrong example:
+        `a=1\\nprint(a)` (one literal line, syntax error). Right: separate lines.
 
     Args:
         code: Python source to execute (sent on stdin to `python -`).
