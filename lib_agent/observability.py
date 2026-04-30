@@ -38,6 +38,19 @@ def setup() -> bool:
         verbose=False,
     )
     LangChainInstrumentor().instrument(tracer_provider=tracer_provider)
+
+    # OpenInference's tracer doesn't implement LangChain 1.x's on_interrupt /
+    # on_resume callback hooks, which causes the dispatcher to print errors on
+    # every HITL gate. Patch in no-op fallbacks until upstream catches up.
+    try:
+        from openinference.instrumentation.langchain._tracer import OpenInferenceTracer
+
+        for method in ("on_interrupt", "on_resume"):
+            if not hasattr(OpenInferenceTracer, method):
+                setattr(OpenInferenceTracer, method, lambda self, *a, **kw: None)
+    except Exception:
+        pass
+
     _instrumented = True
     return True
 

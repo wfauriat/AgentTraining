@@ -19,6 +19,7 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 
 from agent import graph
 from observability import flush, setup as setup_obs
@@ -105,12 +106,25 @@ def score_case(
     }
 
 
+def _run_until_done(app, inputs, config: RunnableConfig, auto_decision: str = "yes") -> dict:
+    """Drive the graph through any HITL interrupts; auto-approve by default
+    so the eval harness runs unattended. Returns the final state."""
+    while True:
+        state = app.invoke(inputs, config=config)
+        snapshot = app.get_state(config)
+        pending = [intr for task in snapshot.tasks for intr in (task.interrupts or [])]
+        if not pending:
+            return state
+        inputs = Command(resume=auto_decision)
+
+
 def run_one(app, case: dict) -> dict:
     thread_id = f"eval-{case['id']}-{uuid4().hex[:6]}"
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     msgs = [SYSTEM, HumanMessage(content=case["prompt"])]
     t0 = time.time()
-    state = app.invoke({"messages": msgs}, config=config)
+    # eval auto-approves all HITL gates so the suite runs unattended.
+    state = _run_until_done(app, {"messages": msgs}, config, auto_decision="yes")
     elapsed = time.time() - t0
     tool_calls = extract_tool_calls(state["messages"])
     tool_results = extract_tool_results(state["messages"])

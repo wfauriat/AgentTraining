@@ -16,6 +16,7 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import Command
 
 from agent import graph
 from observability import flush as flush_traces, make_callbacks
@@ -24,6 +25,20 @@ DB_PATH = Path(__file__).parent / "checkpoints.sqlite"
 SYSTEM = SystemMessage(
     content="You are a helpful assistant. Use tools when relevant. Be brief."
 )
+
+
+def _ask_approval(payload: dict) -> str:
+    """Interactive approval prompt. Returns 'yes' / 'no'.
+    EOF (e.g. heredoc that ran out) is treated as 'no' for safety."""
+    tool = payload.get("tool", "?")
+    args = payload.get("args", {})
+    print(f"\n  ⚠ approval requested: {tool}({args})")
+    try:
+        ans = input("  approve? [y/N] ").strip().lower()
+    except EOFError:
+        print("  (no input — denied)")
+        return "no"
+    return "yes" if ans in {"y", "yes"} else "no"
 
 
 def render_stream(stream_iter) -> None:
@@ -47,6 +62,10 @@ def render_stream(stream_iter) -> None:
 
         elif stream_mode == "updates":
             for _node_name, update in payload.items():
+                # __interrupt__ (and other meta channels) carry tuples, not dicts.
+                # We surface interrupts via the post-stream snapshot, so skip here.
+                if not isinstance(update, dict):
+                    continue
                 for msg in update.get("messages", []):
                     if isinstance(msg, AIMessage):
                         # Text already streamed via "messages" — close the line first.
@@ -121,13 +140,22 @@ def main() -> None:
             fresh = False
         new_msgs.append(HumanMessage(content=user_text))
 
-        render_stream(
-            app.stream(
-                {"messages": new_msgs},
-                config=config,
-                stream_mode=["messages", "updates"],
+        # Interrupt-aware turn: if the graph pauses on an approval gate,
+        # ask the user, then resume with Command(resume=...). Loop until
+        # the graph reaches END (no pending tasks).
+        inputs: dict | Command = {"messages": new_msgs}
+        while True:
+            render_stream(
+                app.stream(inputs, config=config, stream_mode=["messages", "updates"])
             )
-        )
+            snapshot = app.get_state(config)
+            pending = [
+                intr for task in snapshot.tasks for intr in (task.interrupts or [])
+            ]
+            if not pending:
+                break
+            payload = pending[0].value if hasattr(pending[0], "value") else pending[0]
+            inputs = Command(resume=_ask_approval(payload))
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import tools_condition
+from langgraph.types import Command, interrupt
 
 from config import MODEL
 from tools.docs import search_documents
@@ -40,25 +41,63 @@ def call_model(state: MessagesState) -> dict:
     return {"messages": [llm.invoke(state["messages"])]}
 
 
+# Tools that mutate the world or run code. Each call gates on a human
+# approval via interrupt() before the serial tool node executes it.
+DESTRUCTIVE_TOOLS: set[str] = {"write_file", "run_python"}
+
+_APPROVAL_YES = {"yes", "y", "true", "approve", "ok"}
+
+
 def make_serial_tool_node(tools: list[BaseTool]):
-    """Drop-in replacement for ToolNode that runs tool calls sequentially.
+    """Drop-in replacement for ToolNode that runs tool calls sequentially,
+    with a HITL approval gate for destructive tools.
 
-    ToolNode dispatches in a thread pool, which races when tools have ordering
-    deps (e.g. write_file then read_file on the same path emitted in one AI
-    message). This version runs them in the order the model emitted, which
-    matches the implicit dependency the model intended.
-
-    Tradeoff: read-only tools that *could* run in parallel no longer do.
-    Acceptable until we introduce per-tool parallelism declarations.
+    Two phases — important because LangGraph re-runs a node body from the top
+    on every resume(). To avoid duplicate side effects, ALL approvals are
+    gathered first (phase 1, side-effect-free), then ALL tools execute
+    (phase 2, runs exactly once).
     """
     by_name = {t.name: t for t in tools}
 
     def serial_tool_node(state: MessagesState) -> dict:
         last = state["messages"][-1]
+        tool_calls = list(getattr(last, "tool_calls", []) or [])
+
+        # ── Phase 1: gather approvals via interrupt() ───────────────────
+        # Each interrupt(payload) pauses the graph; on resume, returns the
+        # value passed via Command(resume=...). Replays of this loop are
+        # safe — interrupt() recalls prior resume values per call position.
+        approvals: dict[str, str] = {}
+        for call in tool_calls:
+            if call["name"] in DESTRUCTIVE_TOOLS:
+                decision = interrupt(
+                    {
+                        "type": "tool_approval",
+                        "tool": call["name"],
+                        "args": call["args"] or {},
+                        "tool_call_id": call["id"],
+                    }
+                )
+                approvals[call["id"]] = str(decision)
+
+        # ── Phase 2: execute ────────────────────────────────────────────
         results: list[ToolMessage] = []
-        for call in getattr(last, "tool_calls", []) or []:
+        for call in tool_calls:
             name = call["name"]
             args = call["args"] or {}
+
+            if name in DESTRUCTIVE_TOOLS:
+                decision = approvals.get(call["id"], "no").strip().lower()
+                if decision not in _APPROVAL_YES:
+                    results.append(
+                        ToolMessage(
+                            content=f"[denied by user: decision={decision!r}]",
+                            name=name,
+                            tool_call_id=call["id"],
+                        )
+                    )
+                    continue
+
             tool_obj = by_name.get(name)
             if tool_obj is None:
                 content = f"[error: unknown tool '{name}']"
