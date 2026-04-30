@@ -6,3 +6,4 @@ checkpoints.sqlite
 checkpoints.sqlite-journal
 workspace/
 vector_db/
+eval/reports/

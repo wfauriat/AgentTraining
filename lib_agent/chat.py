@@ -18,6 +18,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from agent import graph
+from observability import flush as flush_traces, make_callbacks
 
 DB_PATH = Path(__file__).parent / "checkpoints.sqlite"
 SYSTEM = SystemMessage(
@@ -80,7 +81,13 @@ def main() -> None:
     saver.setup()  # idempotent — creates checkpoint tables on first run
     app = graph.compile(checkpointer=saver)
 
-    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    # callbacks: Langfuse handler if LANGFUSE_* env vars are set, else empty.
+    # The handler captures the full graph trace (model calls, tool calls,
+    # streaming, latencies) and ships it to localhost:3000.
+    config: RunnableConfig = {
+        "configurable": {"thread_id": thread_id},
+        "callbacks": make_callbacks(),
+    }
 
     # If the thread already has history, skip seeding the system message.
     snapshot = app.get_state(config)
@@ -99,11 +106,13 @@ def main() -> None:
             user_text = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nbye.")
+            flush_traces()
             break
         if not user_text:
             continue
         if user_text.lower() in {"quit", "exit"}:
             print("bye.")
+            flush_traces()
             break
 
         new_msgs: list = []

@@ -1,0 +1,23 @@
+# Local self-hosted Phoenix (Arize). Single container, stores traces in
+# SQLite by default — fine for local learning, swap to Postgres for scale.
+#
+# Bring up:   docker compose -f observability/docker-compose.phoenix.yml up -d
+# Tear down:  docker compose -f observability/docker-compose.phoenix.yml down
+#
+# UI:                    http://localhost:6006
+# OTLP gRPC ingest:      grpc://localhost:4317
+# OTLP HTTP ingest:      http://localhost:6006/v1/traces
+
+services:
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: phoenix
+    ports:
+      - "6006:6006"   # UI + HTTP OTLP
+      - "4317:4317"   # gRPC OTLP
+    volumes:
+      - phoenix-data:/mnt/data
+    restart: unless-stopped
+
+volumes:
+  phoenix-data:
