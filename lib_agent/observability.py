@@ -64,12 +64,17 @@ def make_callbacks() -> list:
 
 
 def flush() -> None:
-    """Force-flush buffered OTel spans. Call before short-lived exits."""
+    """Force-flush buffered OTel spans. Call before short-lived exits.
+
+    The base `TracerProvider` API doesn't declare `force_flush`; only the
+    SDK subclass does. We resolve via getattr to keep the type checker
+    quiet and tolerate a non-SDK provider being installed."""
     try:
         from opentelemetry import trace
 
         provider = trace.get_tracer_provider()
-        if hasattr(provider, "force_flush"):
-            provider.force_flush(timeout_millis=5000)
+        force_flush = getattr(provider, "force_flush", None)
+        if callable(force_flush):
+            force_flush(timeout_millis=5000)
     except Exception:
         pass

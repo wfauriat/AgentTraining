@@ -5,6 +5,7 @@
 import argparse
 import sqlite3
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from langchain_core.messages import (
@@ -18,20 +19,28 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
-from agent import graph
 from observability import flush as flush_traces, make_callbacks
 
 DB_PATH = Path(__file__).parent / "checkpoints.sqlite"
 SYSTEM = SystemMessage(
     content="You are a helpful assistant. Use tools when relevant. Be brief."
 )
+# Worker node names in the multi-agent graph. When updates arrive from these
+# nodes, the AI message content was produced by an inner LLM call we never
+# saw at token level — print it here, since streaming missed it.
+_WORKER_NODES = {"research_agent", "code_agent"}
 
 
-def _ask_approval(payload: dict) -> str:
+def _ask_approval(payload: Any) -> str:
     """Interactive approval prompt. Returns 'yes' / 'no'.
-    EOF (e.g. heredoc that ran out) is treated as 'no' for safety."""
-    tool = payload.get("tool", "?")
-    args = payload.get("args", {})
+    EOF (e.g. heredoc that ran out) is treated as 'no' for safety.
+
+    `payload` is whatever was passed to `interrupt(...)` inside the agent's
+    tool node — for our destructive-tool gate it's a dict, but it could also
+    be a langgraph Interrupt object depending on version, so we duck-type."""
+    payload = getattr(payload, "value", payload)
+    tool = payload.get("tool", "?") if isinstance(payload, dict) else "?"
+    args = payload.get("args", {}) if isinstance(payload, dict) else {}
     print(f"\n  ⚠ approval requested: {tool}({args})")
     try:
         ans = input("  approve? [y/N] ").strip().lower()
@@ -53,27 +62,46 @@ def render_stream(stream_iter) -> None:
 
     for stream_mode, payload in stream_iter:
         if stream_mode == "messages":
-            chunk, _meta = payload
+            chunk, meta = payload
             if isinstance(chunk, AIMessageChunk) and chunk.content:
+                # Skip the supervisor's structured-output stream — that JSON
+                # is internal routing, not user-facing content.
+                node = (meta or {}).get("langgraph_node")
+                if node == "supervisor":
+                    continue
                 if not streaming:
                     print("\nAssistant: ", end="", flush=True)
                     streaming = True
                 print(chunk.content, end="", flush=True)
 
         elif stream_mode == "updates":
-            for _node_name, update in payload.items():
+            for node_name, update in payload.items():
                 # __interrupt__ (and other meta channels) carry tuples, not dicts.
                 # We surface interrupts via the post-stream snapshot, so skip here.
                 if not isinstance(update, dict):
                     continue
+                # Multi-agent: surface supervisor routing as a one-liner.
+                if node_name == "supervisor":
+                    nxt = update.get("next")
+                    reason = update.get("supervisor_reason") or ""
+                    if nxt:
+                        if streaming:
+                            print()
+                            streaming = False
+                        print(f"  [supervisor → {nxt}] {reason}")
+                    continue
+                is_worker = node_name in _WORKER_NODES
                 for msg in update.get("messages", []):
                     if isinstance(msg, AIMessage):
-                        # Text already streamed via "messages" — close the line first.
                         if streaming:
                             print()
                             streaming = False
                         for call in msg.tool_calls or []:
                             print(f"  [tool: {call['name']}({call['args']})]")
+                        # Worker subgraphs are invoked, not streamed, so their
+                        # text content lands here (not via messages mode).
+                        if is_worker and msg.content and str(msg.content).strip():
+                            print(f"\n  ({node_name}): {msg.content}\n")
                     elif isinstance(msg, ToolMessage):
                         text = str(msg.content)
                         preview = (text[:200] + "…") if len(text) > 200 else text
@@ -90,8 +118,18 @@ def main() -> None:
         default=None,
         help="thread_id to resume; defaults to a new uuid-based id",
     )
+    parser.add_argument(
+        "--multi",
+        action="store_true",
+        help="use the multi-agent supervisor graph (research_agent + code_agent)",
+    )
     args = parser.parse_args()
     thread_id = args.thread or f"chat-{uuid4().hex[:8]}"
+
+    if args.multi:
+        from multi_agent import graph
+    else:
+        from agent import graph
 
     # check_same_thread=False: SqliteSaver may touch the connection from
     # internal worker threads when tool calls run concurrently.
@@ -100,12 +138,12 @@ def main() -> None:
     saver.setup()  # idempotent — creates checkpoint tables on first run
     app = graph.compile(checkpointer=saver)
 
-    # callbacks: Langfuse handler if LANGFUSE_* env vars are set, else empty.
-    # The handler captures the full graph trace (model calls, tool calls,
-    # streaming, latencies) and ships it to localhost:3000.
+    # callbacks: Phoenix instrumentation is implicit; this stays empty.
+    # recursion_limit bumped for multi-agent loops (supervisor↔worker cycles).
     config: RunnableConfig = {
         "configurable": {"thread_id": thread_id},
         "callbacks": make_callbacks(),
+        "recursion_limit": 50 if args.multi else 25,
     }
 
     # If the thread already has history, skip seeding the system message.
@@ -143,7 +181,10 @@ def main() -> None:
         # Interrupt-aware turn: if the graph pauses on an approval gate,
         # ask the user, then resume with Command(resume=...). Loop until
         # the graph reaches END (no pending tasks).
-        inputs: dict | Command = {"messages": new_msgs}
+        # `inputs` is intentionally typed as Any: the concrete graph state
+        # depends on --multi (MessagesState vs SupervisorState), and chat.py
+        # is the runtime dispatch layer that doesn't know which.
+        inputs: Any = {"messages": new_msgs}
         while True:
             render_stream(
                 app.stream(inputs, config=config, stream_mode=["messages", "updates"])
