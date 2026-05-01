@@ -19,7 +19,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import tools_condition
 
 from agent import get_current_time, make_serial_tool_node, prune_node
-from config import MODEL, NUM_CTX
+from config import KEEP_ALIVE, MODEL, MODEL_TIMEOUT, NUM_CTX
 from prompts import CODE_SYSTEM, RESEARCH_SYSTEM, SUPERVISOR_SYSTEM
 from tools.docs import search_documents
 from tools.files import (
@@ -48,7 +48,13 @@ def _build_worker(tools: list[BaseTool], system_prompt: str):
     """Compile a tool-calling subgraph with its own LLM + tool subset.
     No checkpointer here — the parent supervisor's checkpointer covers the
     whole composition."""
-    worker_llm = ChatOllama(model=MODEL, temperature=0, num_ctx=NUM_CTX).bind_tools(tools)
+    worker_llm = ChatOllama(
+        model=MODEL,
+        temperature=0,
+        num_ctx=NUM_CTX,
+        keep_alive=KEEP_ALIVE,
+        client_kwargs={"timeout": MODEL_TIMEOUT},
+    ).bind_tools(tools)
 
     def call_model(state: _WorkerState) -> dict:
         msgs = [SystemMessage(content=system_prompt), *state["messages"]]
@@ -102,7 +108,13 @@ _ROUTE_KEYWORDS: tuple[str, ...] = ("research_agent", "code_agent", "FINISH")
 # tokens get stripped from content by ChatOllama, sometimes leaving the
 # message empty. Routing is short and doesn't need reasoning anyway.
 SUPERVISOR_MODEL = "qwen3-nothink"
-supervisor_llm = ChatOllama(model=SUPERVISOR_MODEL, temperature=0, num_ctx=NUM_CTX)
+supervisor_llm = ChatOllama(
+    model=SUPERVISOR_MODEL,
+    temperature=0,
+    num_ctx=NUM_CTX,
+    keep_alive=KEEP_ALIVE,
+    client_kwargs={"timeout": MODEL_TIMEOUT},
+)
 
 
 def _pick_keyword(text: str) -> str | None:

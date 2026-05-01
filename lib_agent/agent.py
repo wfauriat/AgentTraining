@@ -22,7 +22,9 @@ from langgraph.prebuilt import tools_condition
 from langgraph.types import Command, interrupt
 
 from config import (
+    KEEP_ALIVE,
     MODEL,
+    MODEL_TIMEOUT,
     NUM_CTX,
     PRUNE_THRESHOLD_TOKENS,
     SUMMARY_KEEP_TAIL,
@@ -71,8 +73,20 @@ TOOLS: list[BaseTool] = [
     forget,
     recall,
 ]
-llm = ChatOllama(model=MODEL, temperature=0, num_ctx=NUM_CTX).bind_tools(TOOLS)
-summarizer_llm = ChatOllama(model=SUMMARY_MODEL, temperature=0, num_ctx=NUM_CTX)
+llm = ChatOllama(
+    model=MODEL,
+    temperature=0,
+    num_ctx=NUM_CTX,
+    keep_alive=KEEP_ALIVE,
+    client_kwargs={"timeout": MODEL_TIMEOUT},
+).bind_tools(TOOLS)
+summarizer_llm = ChatOllama(
+    model=SUMMARY_MODEL,
+    temperature=0,
+    num_ctx=NUM_CTX,
+    keep_alive=KEEP_ALIVE,
+    client_kwargs={"timeout": MODEL_TIMEOUT},
+)
 
 
 # ── State with rolling summary ───────────────────────────────────────────
