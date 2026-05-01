@@ -19,10 +19,28 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
+from rich.console import Console
 
 from config import TURN_TIMEOUT
 from observability import flush as flush_traces, make_callbacks
 from prompts import CHAT_SYSTEM, PERSONA_PATH, resolve_chat_system
+
+# Single Console instance for the whole REPL. Rich auto-detects TTY and
+# falls back to plain output when piped. Stderr left to default channel.
+_console = Console()
+
+# /debug toggle: when False (default), tool calls / tool results / supervisor
+# routing / multi-agent worker chatter are hidden — user sees only their own
+# prompts, the final assistant reply, footer, and status bar. When True,
+# everything is shown (the verbose view we had before this step).
+_DEBUG = False
+
+
+def _thread_id(config: RunnableConfig) -> str:
+    """Read thread_id from a RunnableConfig with a sensible fallback.
+    `configurable` is an optional key in RunnableConfig per langchain's typing,
+    so we can't subscript it directly without the type checker complaining."""
+    return (config.get("configurable") or {}).get("thread_id", "?")
 
 
 class TurnTimeout(Exception):
@@ -60,17 +78,36 @@ def _slash_help() -> str:
         "  /persona edit               multi-line edit (blank line ends)",
         "  /persona load <path>        read persona from a file",
         "  /persona <inline text>      one-line persona replacement",
+        "  /debug [on|off|toggle]      verbose stream (tool calls + routing)",
         "  /clear                      wipe the current thread (start fresh)",
         "  /quit  /exit  /q            leave the REPL",
-        "(more coming as the UX pass progresses)",
     ])
+
+
+def _slash_debug(args: str) -> str:
+    """Toggle / set the verbose render mode. Off by default (clean), on shows
+    tool calls, tool results, and multi-agent routing chatter."""
+    global _DEBUG
+    s = args.strip().lower()
+    if s == "":
+        # Bare /debug shows current state — no flip. Use 'toggle' to flip.
+        return f"debug mode: {'ON' if _DEBUG else 'OFF'} (use 'on' / 'off' / 'toggle')"
+    if s == "toggle":
+        _DEBUG = not _DEBUG
+    elif s in ("on", "true", "1"):
+        _DEBUG = True
+    elif s in ("off", "false", "0"):
+        _DEBUG = False
+    else:
+        return f"usage: /debug [on|off|toggle]    (currently {'on' if _DEBUG else 'off'})"
+    return f"debug mode: {'ON' if _DEBUG else 'OFF'} — applies to next turn"
 
 
 def _slash_clear(app, config: RunnableConfig) -> str:
     """Drop the current thread's checkpoints. The next user message will
     re-seed the system prompt because get_state will return empty messages."""
     saver = getattr(app, "checkpointer", None)
-    thread_id = config["configurable"]["thread_id"]
+    thread_id = _thread_id(config)
     if saver is not None and hasattr(saver, "delete_thread"):
         saver.delete_thread(thread_id)
         return f"cleared thread {thread_id!r}; next message starts fresh"
@@ -186,7 +223,7 @@ def _slash_threads(config: RunnableConfig) -> str:
         return f"[error reading threads: {e}]"
     if not rows:
         return "(no threads)"
-    current = config["configurable"]["thread_id"]
+    current = _thread_id(config)
     lines = []
     for tid, n in rows:
         marker = "  ← current" if tid == current else ""
@@ -219,6 +256,8 @@ def _handle_slash(line: str, app, config: RunnableConfig):
         return _slash_threads(config)
     if head == "/persona":
         return _slash_persona(args)
+    if head == "/debug":
+        return _slash_debug(args)
     return f"unknown slash command: {head}. type /help"
 
 
@@ -248,7 +287,7 @@ def _status_bar(app, config: RunnableConfig) -> str:
     pct = int(100 * ctx_tokens / NUM_CTX) if NUM_CTX > 0 else 0
     summary_marker = "✓" if summary else "—"
     facts_count = len(load_facts())
-    thread = config["configurable"]["thread_id"]
+    thread = _thread_id(config)
 
     return (
         f"[ thread {thread}"
@@ -291,24 +330,33 @@ def _turn_footer(
 
 def _ask_approval(payload: Any) -> str:
     """Interactive approval prompt. Returns 'yes' / 'no'.
-    EOF (e.g. heredoc that ran out) is treated as 'no' for safety.
-
-    `payload` is whatever was passed to `interrupt(...)` inside the agent's
-    tool node — for our destructive-tool gate it's a dict, but it could also
-    be a langgraph Interrupt object depending on version, so we duck-type."""
+    Always shown — HITL is a hard gate, not affected by /debug.
+    EOF (e.g. heredoc that ran out) is treated as 'no' for safety."""
     payload = getattr(payload, "value", payload)
     tool = payload.get("tool", "?") if isinstance(payload, dict) else "?"
     args = payload.get("args", {}) if isinstance(payload, dict) else {}
-    print(f"\n  ⚠ approval requested: {tool}({args})")
+    _console.print(f"\n  [bold red]⚠ approval requested[/bold red]: [yellow]{tool}[/yellow]({args})")
     try:
         ans = input("  approve? [y/N] ").strip().lower()
     except EOFError:
-        print("  (no input — denied)")
+        _console.print("  [dim](no input — denied)[/dim]")
         return "no"
     return "yes" if ans in {"y", "yes"} else "no"
 
 
 def render_stream(stream_iter, deadline: float | None = None) -> None:
+    """Renders multi-mode (`messages` + `updates`) graph stream into the
+    console with Rich coloring.
+
+    Display tiers:
+      Always visible:   AI text reply (the final user-facing answer).
+                        Worker subgraph AI replies in multi-agent (each
+                        worker's content is part of the user-facing flow).
+                        Approval prompts (HITL must be visible regardless).
+      Debug-only:       tool call lines, tool result previews, supervisor
+                        routing one-liners. These are diagnostic clutter for
+                        normal use; turn on with /debug.
+    """
     """Render a multi-mode stream:
        - "messages" mode: token-by-token AI text, printed inline with flush
        - "updates"  mode: discrete events (tool calls assembled, tool results)
@@ -318,24 +366,25 @@ def render_stream(stream_iter, deadline: float | None = None) -> None:
     `{'fil → {'filep → {'filepath...` as the args streamed in)."""
     streaming = False  # are we mid-way through printing an AI text reply?
 
+    def _close_streaming():
+        nonlocal streaming
+        if streaming:
+            _console.print()
+            streaming = False
+
     for stream_mode, payload in stream_iter:
         # Cooperative deadline check: cancellation precision = chunk cadence.
-        # When the model is streaming, this fires within milliseconds of the
-        # deadline. If the model is mid-call (no chunks), we won't notice
-        # until the underlying ChatOllama timeout fires (MODEL_TIMEOUT).
         if deadline is not None and time.monotonic() > deadline:
             try:
                 stream_iter.close()
             except Exception:
                 pass
-            if streaming:
-                print()  # close the current AI text line cleanly
+            _close_streaming()
             raise TurnTimeout()
+
         if stream_mode == "messages":
             chunk, meta = payload
             if isinstance(chunk, AIMessageChunk) and chunk.content:
-                # Skip the supervisor's structured-output stream — that JSON
-                # is internal routing, not user-facing content.
                 node = (meta or {}).get("langgraph_node")
                 # Skip internal LLM streams that aren't user-facing replies:
                 #   - supervisor: routing decisions (multi-agent)
@@ -343,45 +392,74 @@ def render_stream(stream_iter, deadline: float | None = None) -> None:
                 if node in ("supervisor", "prune"):
                     continue
                 if not streaming:
-                    print("\nAssistant: ", end="", flush=True)
+                    _console.print("\n[bold cyan]Assistant[/bold cyan]")
                     streaming = True
-                print(chunk.content, end="", flush=True)
+                # highlight=False stops Rich auto-coloring numbers/URLs in the
+                # AI's reply text — preserves the model's exact prose.
+                _console.print(chunk.content, end="", soft_wrap=True, highlight=False)
 
         elif stream_mode == "updates":
             for node_name, update in payload.items():
-                # __interrupt__ (and other meta channels) carry tuples, not dicts.
-                # We surface interrupts via the post-stream snapshot, so skip here.
+                # __interrupt__ etc. carry tuples; we handle interrupts via
+                # the post-stream snapshot, skip them here.
                 if not isinstance(update, dict):
                     continue
-                # Multi-agent: surface supervisor routing as a one-liner.
+
+                # Supervisor routing — debug only.
                 if node_name == "supervisor":
+                    if not _DEBUG:
+                        continue
                     nxt = update.get("next")
                     reason = update.get("supervisor_reason") or ""
                     if nxt:
-                        if streaming:
-                            print()
-                            streaming = False
-                        print(f"  [supervisor → {nxt}] {reason}")
+                        _close_streaming()
+                        # markup=False keeps the inner [supervisor → ...]
+                        # brackets literal — without it Rich's markup parser
+                        # would treat them as tags and eat the line.
+                        _console.print(
+                            f"  [supervisor → {nxt}]  {reason}",
+                            style="magenta",
+                            markup=False,
+                            highlight=False,
+                        )
                     continue
+
                 is_worker = node_name in _WORKER_NODES
                 for msg in update.get("messages", []):
                     if isinstance(msg, AIMessage):
-                        if streaming:
-                            print()
-                            streaming = False
-                        for call in msg.tool_calls or []:
-                            print(f"  [tool: {call['name']}({call['args']})]")
-                        # Worker subgraphs are invoked, not streamed, so their
-                        # text content lands here (not via messages mode).
+                        # Tool calls — debug only.
+                        if msg.tool_calls and _DEBUG:
+                            _close_streaming()
+                            for call in msg.tool_calls:
+                                _console.print(
+                                    f"  [tool: {call['name']}({call['args']})]",
+                                    style="yellow",
+                                    markup=False,
+                                    highlight=False,
+                                )
+                        # Worker subgraph text content always shown — it is
+                        # the user-facing answer in multi-agent. Header named
+                        # so multiple workers' replies remain distinguishable.
                         if is_worker and msg.content and str(msg.content).strip():
-                            print(f"\n  ({node_name}): {msg.content}\n")
+                            _close_streaming()
+                            _console.print(f"\n[bold cyan]{node_name}[/bold cyan]")
+                            _console.print(str(msg.content), highlight=False)
+                            _console.print()
                     elif isinstance(msg, ToolMessage):
+                        # Tool results — debug only.
+                        if not _DEBUG:
+                            continue
                         text = str(msg.content)
                         preview = (text[:200] + "…") if len(text) > 200 else text
-                        print(f"  [{msg.name} → {preview}]")
+                        _close_streaming()
+                        _console.print(
+                            f"  [{msg.name} → {preview}]",
+                            style="green",
+                            markup=False,
+                            highlight=False,
+                        )
 
-    if streaming:
-        print()  # close the line if the turn ended on an AI text reply
+    _close_streaming()
 
 
 def main() -> None:
@@ -433,9 +511,16 @@ def main() -> None:
     print("Type /help for commands, /quit to exit. Resume later with: python chat.py --thread", thread_id, "\n")
 
     while True:
-        # Status bar before every prompt — gives instant visibility into
-        # ctx budget, summary state, fact count.
-        print(_status_bar(app, config))
+        # Status bar as a Rich rule — horizontal divider with the status info.
+        # Color-coded by ctx pressure: green <50%, yellow 50-75%, red 75%+.
+        _console.print()
+        bar = _status_bar(app, config)
+        # Probe the percent from the bar text to color-pick.
+        from agent import _approx_tokens
+        from config import NUM_CTX
+        pct = int(100 * _approx_tokens(app.get_state(config).values.get("messages", [])) / NUM_CTX) if NUM_CTX else 0
+        rule_style = "green" if pct < 50 else "yellow" if pct < 75 else "red"
+        _console.rule(f"[dim]{bar}[/dim]", style=rule_style)
         try:
             user_text = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -458,12 +543,15 @@ def main() -> None:
             break
         if slash is not _SLASH_NOT_HANDLED:
             if slash:
-                # Indent + blank line so slash output reads as system-level,
-                # not as a continuation of either user input or agent reply.
-                print()
+                # System-level lines: cyan bullet, dim body. Visually distinct
+                # from user input above and any future agent reply below.
+                # markup=False on the body line preserves any literal square
+                # brackets (e.g. /help text mentions "/debug [on|off|toggle]").
+                _console.print()
                 for line in str(slash).splitlines():
-                    print(f"  · {line}")
-                print()
+                    _console.print("  [cyan]·[/cyan] ", end="")
+                    _console.print(line, style="dim", markup=False, highlight=False)
+                _console.print()
             continue  # next user prompt
 
         # System prompt is no longer seeded into state; agent.call_model
@@ -499,18 +587,19 @@ def main() -> None:
                 inputs = Command(resume=_ask_approval(payload))
                 deadline = time.monotonic() + TURN_TIMEOUT  # restart budget post-approval
         except TurnTimeout:
-            print(f"\n  · turn timed out after {TURN_TIMEOUT}s — aborted")
-            print("  · partial state may be in the thread; /clear to reset if needed")
+            _console.print(f"\n  [yellow]· turn timed out after {TURN_TIMEOUT}s — aborted[/yellow]")
+            _console.print("  [dim]· partial state may be in the thread; /clear to reset if needed[/dim]")
         except KeyboardInterrupt:
-            print("\n  · turn interrupted by user")
+            _console.print("\n  [yellow]· turn interrupted by user[/yellow]")
         except Exception as e:
             # Catch model timeouts, ollama errors, etc. so the REPL never dies.
-            print(f"\n  · turn failed ({type(e).__name__}): {e}")
+            _console.print(f"\n  [red]· turn failed ({type(e).__name__})[/red]: {e}")
 
         # Per-turn footer always prints, even on partial failure — useful
-        # for diagnosing where a slow turn spent its time.
+        # for diagnosing where a slow turn spent its time. Dim grey so it
+        # de-emphasizes against the AI reply above.
         elapsed = time.monotonic() - turn_start
-        print(f"  {_turn_footer(app, config, prior_ids, elapsed)}")
+        _console.print(f"  [dim]{_turn_footer(app, config, prior_ids, elapsed)}[/dim]")
 
 
 if __name__ == "__main__":
