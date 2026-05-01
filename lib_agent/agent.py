@@ -30,10 +30,13 @@ from config import (
 )
 from tools.docs import search_documents
 from tools.files import (
+    copy_file,
     delete_file,
+    edit_file,
     find_files,
     list_directory,
     make_directory,
+    move_file,
     read_file,
     write_file,
 )
@@ -52,6 +55,9 @@ TOOLS: list[BaseTool] = [
     get_current_time,
     read_file,
     write_file,
+    edit_file,
+    copy_file,
+    move_file,
     list_directory,
     make_directory,
     find_files,
@@ -200,7 +206,14 @@ def call_model(state: AgentState) -> dict:
 
 # Tools that mutate the world or run code. Each call gates on a human
 # approval via interrupt() before the serial tool node executes it.
-DESTRUCTIVE_TOOLS: set[str] = {"write_file", "run_python", "delete_file"}
+DESTRUCTIVE_TOOLS: set[str] = {
+    "write_file",
+    "run_python",
+    "delete_file",
+    "edit_file",
+    "copy_file",
+    "move_file",
+}
 
 _APPROVAL_YES = {"yes", "y", "true", "approve", "ok"}
 

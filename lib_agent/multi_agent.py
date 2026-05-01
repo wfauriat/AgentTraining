@@ -22,10 +22,13 @@ from agent import get_current_time, make_serial_tool_node, prune_node
 from config import MODEL, NUM_CTX
 from tools.docs import search_documents
 from tools.files import (
+    copy_file,
     delete_file,
+    edit_file,
     find_files,
     list_directory,
     make_directory,
+    move_file,
     read_file,
     write_file,
 )
@@ -84,6 +87,9 @@ CODE_TOOLS = [
     run_python,
     read_file,
     write_file,
+    edit_file,
+    copy_file,
+    move_file,
     list_directory,
     make_directory,
     find_files,

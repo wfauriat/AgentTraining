@@ -1,6 +1,7 @@
 # tools/files.py — sandboxed file tools. Same semantics as agent/tools/files.py,
 # rewritten in LangChain @tool style so ToolNode handles schema + validation.
 
+import shutil
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -154,3 +155,113 @@ def delete_file(path: str) -> str:
         return f"Deleted {rel}"
     except Exception as e:
         return f"[error deleting file: {e}]"
+
+
+@tool
+def copy_file(src: str, dst: str) -> str:
+    """Copy a file inside the workspace. Refuses directory copies. If dst
+    exists, it is overwritten. Creates intermediate directories under dst.
+
+    Args:
+        src: source file path, relative to the workspace root.
+        dst: destination file path, relative to the workspace root.
+    """
+    safe_src = _safe_path(src)
+    safe_dst = _safe_path(dst)
+    if safe_src is None or safe_dst is None:
+        return "[error: path outside workspace or invalid]"
+    if not safe_src.exists():
+        return f"[error: source file does not exist — {src}]"
+    if safe_src.is_dir():
+        return f"[error: refusing to copy a directory — {src}]"
+    try:
+        safe_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(safe_src), str(safe_dst))
+        workspace = Path(WORKSPACE_DIR).resolve()
+        return f"Copied {safe_src.relative_to(workspace)} → {safe_dst.relative_to(workspace)}"
+    except Exception as e:
+        return f"[error copying file: {e}]"
+
+
+@tool
+def move_file(src: str, dst: str) -> str:
+    """Move or rename a file inside the workspace. Refuses directory moves.
+    If dst exists, it is overwritten. Creates intermediate directories under dst.
+
+    Args:
+        src: source file path, relative to the workspace root.
+        dst: destination file path, relative to the workspace root.
+    """
+    safe_src = _safe_path(src)
+    safe_dst = _safe_path(dst)
+    if safe_src is None or safe_dst is None:
+        return "[error: path outside workspace or invalid]"
+    if not safe_src.exists():
+        return f"[error: source file does not exist — {src}]"
+    if safe_src.is_dir():
+        return f"[error: refusing to move a directory — {src}]"
+    try:
+        safe_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(safe_src), str(safe_dst))
+        workspace = Path(WORKSPACE_DIR).resolve()
+        return f"Moved {src} → {safe_dst.relative_to(workspace)}"
+    except Exception as e:
+        return f"[error moving file: {e}]"
+
+
+@tool
+def edit_file(
+    filepath: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool = False,
+) -> str:
+    """Surgical string replacement in a workspace file. Reads the file,
+    replaces `old_string` with `new_string`, writes it back.
+
+    Safety: by default `old_string` must appear EXACTLY ONCE in the file —
+    otherwise the call is rejected. This prevents accidentally clobbering
+    matching text in unrelated places. To replace every occurrence, set
+    `replace_all=True`. To pick one of several occurrences, include enough
+    surrounding context in `old_string` to make it unique.
+
+    Args:
+        filepath: path of the file, relative to the workspace root.
+        old_string: text to find. Must be non-empty and (by default) unique.
+        new_string: replacement text. Must differ from old_string.
+        replace_all: replace every occurrence (default: only when unique).
+    """
+    safe = _safe_path(filepath)
+    if safe is None:
+        return "[error: path outside workspace or invalid]"
+    if not safe.exists():
+        return f"[error: file does not exist — {filepath}]"
+    if safe.is_dir():
+        return f"[error: not a file — {filepath}]"
+    if not old_string:
+        return "[error: old_string is empty]"
+    if old_string == new_string:
+        return "[error: old_string and new_string are identical — no edit needed]"
+    try:
+        content = safe.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"[error reading file: {e}]"
+
+    count = content.count(old_string)
+    if count == 0:
+        return f"[error: old_string not found in {filepath}]"
+    if count > 1 and not replace_all:
+        return (
+            f"[error: old_string appears {count} times in {filepath}; "
+            f"set replace_all=True to replace all, or include more context "
+            f"in old_string to make it unique]"
+        )
+
+    new_content = content.replace(old_string, new_string)
+    try:
+        safe.write_text(new_content, encoding="utf-8")
+    except Exception as e:
+        return f"[error writing file: {e}]"
+
+    workspace = Path(WORKSPACE_DIR).resolve()
+    return f"Replaced {count} occurrence(s) in {safe.relative_to(workspace)}"
