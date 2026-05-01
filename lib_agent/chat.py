@@ -20,11 +20,26 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from observability import flush as flush_traces, make_callbacks
+from prompts import CHAT_SYSTEM
 
 DB_PATH = Path(__file__).parent / "checkpoints.sqlite"
-SYSTEM = SystemMessage(
-    content="You are a helpful assistant. Use tools when relevant. Be brief."
-)
+PERSONA_PATH = Path(__file__).parent / "persona.txt"
+
+
+def _resolve_system_prompt() -> str:
+    """Return the active system prompt: persona.txt if present, else default.
+    Read once at chat-session start; /persona will reload it later."""
+    if PERSONA_PATH.exists():
+        try:
+            override = PERSONA_PATH.read_text(encoding="utf-8").strip()
+            if override:
+                return override
+        except Exception:
+            pass
+    return CHAT_SYSTEM
+
+
+SYSTEM = SystemMessage(content=_resolve_system_prompt())
 # Worker node names in the multi-agent graph. When updates arrive from these
 # nodes, the AI message content was produced by an inner LLM call we never
 # saw at token level — print it here, since streaming missed it.

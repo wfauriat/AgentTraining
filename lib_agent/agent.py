@@ -28,6 +28,7 @@ from config import (
     SUMMARY_KEEP_TAIL,
     SUMMARY_MODEL,
 )
+from prompts import SUMMARIZER_SYSTEM
 from tools.docs import search_documents
 from tools.files import (
     copy_file,
@@ -164,12 +165,7 @@ def prune_node(state: AgentState) -> dict:
     prior_section = f"Prior summary:\n{prior}\n\n" if prior else ""
 
     summary_input: list = [
-        SystemMessage(
-            content=(
-                "You write concise conversation summaries. Reply with ONLY the "
-                "summary text — no preamble, no formatting headers."
-            )
-        ),
+        SystemMessage(content=SUMMARIZER_SYSTEM),
         HumanMessage(
             content=(
                 f"{prior_section}Conversation transcript to summarize "

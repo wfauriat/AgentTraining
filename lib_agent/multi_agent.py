@@ -20,6 +20,7 @@ from langgraph.prebuilt import tools_condition
 
 from agent import get_current_time, make_serial_tool_node, prune_node
 from config import MODEL, NUM_CTX
+from prompts import CODE_SYSTEM, RESEARCH_SYSTEM, SUPERVISOR_SYSTEM
 from tools.docs import search_documents
 from tools.files import (
     copy_file,
@@ -71,17 +72,6 @@ RESEARCH_TOOLS = [
     search_documents,
     recall,  # read-only access to persisted facts
 ]
-RESEARCH_SYSTEM = (
-    "You are the research_agent. Your tools: web_search, web_fetch, "
-    "search_documents (local corpus), get_current_time.\n\n"
-    "Look at the user's request and the conversation. Identify the part "
-    "that needs lookup, search, or factual information — and answer THAT "
-    "part using your tools. If the fact is already in the conversation, "
-    "do not repeat it; just say you defer to the existing reply.\n\n"
-    "Be concise (one short paragraph max). After your reply, control "
-    "returns to a supervisor that may delegate to another worker."
-)
-
 CODE_TOOLS = [
     get_current_time,
     run_python,
@@ -98,22 +88,6 @@ CODE_TOOLS = [
     forget,
     recall,
 ]
-CODE_SYSTEM = (
-    "You are the code_agent. Your tools: run_python (Docker sandbox), "
-    "read_file, write_file (workspace), get_current_time.\n\n"
-    "Look at the user's request and the conversation. Identify the part "
-    "that requires CODE EXECUTION, FILE READ, or FILE WRITE — and do it "
-    "by CALLING your tools.\n\n"
-    "CRITICAL RULES:\n"
-    "- You MUST call a tool, not just describe what should happen.\n"
-    "- If the user asked to write a file and you have the content from "
-    "  the conversation, call write_file NOW with that content.\n"
-    "- If the user asked to compute something, call run_python NOW.\n"
-    "- Producing only a text reply about what 'would' happen is a failure.\n\n"
-    "Be concise. After tool execution, give a one-sentence confirmation "
-    "and control returns to a supervisor."
-)
-
 research_agent = _build_worker(RESEARCH_TOOLS, RESEARCH_SYSTEM)
 code_agent = _build_worker(CODE_TOOLS, CODE_SYSTEM)
 
@@ -122,50 +96,6 @@ code_agent = _build_worker(CODE_TOOLS, CODE_SYSTEM)
 
 WorkerChoice = Literal["research_agent", "code_agent", "FINISH"]
 _ROUTE_KEYWORDS: tuple[str, ...] = ("research_agent", "code_agent", "FINISH")
-
-
-SUPERVISOR_SYSTEM = """Pick the next worker in a multi-agent system AND
-write a one-sentence directive for it.
-
-WORKERS:
-- research_agent: web search, web fetch, local document RAG. READ-ONLY.
-- code_agent: Python sandbox, file read/write. REQUIRED for ANY file write,
-  code execution, or workspace modification.
-
-OUTPUT FORMAT — two lines exactly:
-Line 1: keyword  (research_agent | code_agent | FINISH)
-Line 2: one-sentence directive for that worker (omit if FINISH)
-
-The directive on line 2 is critical: it tells the worker EXACTLY what to do.
-For code_agent, the directive must say which tool to call and with what.
-
-EXAMPLES:
-
-User: "What time is it and save it to clock.txt"
-First decision:
-research_agent
-Call get_current_time and report the current time.
-
-After research_agent replies "Time is 16:30":
-code_agent
-Call write_file with filepath=clock.txt and content=16:30.
-
-After code_agent confirms write:
-FINISH
-
-User: "Define photosynthesis from the corpus, then save to bio.md"
-First decision:
-research_agent
-Call search_documents with query=photosynthesis and provide a one-sentence definition.
-
-After research_agent provides the definition:
-code_agent
-Call write_file with filepath=bio.md and content set to the one-sentence definition just produced.
-
-After code_agent writes:
-FINISH
-
-NOW DECIDE — output two lines (or just FINISH on one line). No extra text."""
 
 
 # Use the no-thinking Qwen3 variant for supervisor decisions: thinking
