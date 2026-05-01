@@ -19,7 +19,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import tools_condition
 
 from agent import get_current_time, make_serial_tool_node
-from config import MODEL
+from config import MODEL, NUM_CTX
 from tools.docs import search_documents
 from tools.files import read_file, write_file
 from tools.python_sandbox import run_python
@@ -36,7 +36,7 @@ def _build_worker(tools: list[BaseTool], system_prompt: str):
     """Compile a tool-calling subgraph with its own LLM + tool subset.
     No checkpointer here — the parent supervisor's checkpointer covers the
     whole composition."""
-    worker_llm = ChatOllama(model=MODEL, temperature=0).bind_tools(tools)
+    worker_llm = ChatOllama(model=MODEL, temperature=0, num_ctx=NUM_CTX).bind_tools(tools)
 
     def call_model(state: _WorkerState) -> dict:
         msgs = [SystemMessage(content=system_prompt), *state["messages"]]
@@ -140,7 +140,7 @@ NOW DECIDE — output two lines (or just FINISH on one line). No extra text."""
 # tokens get stripped from content by ChatOllama, sometimes leaving the
 # message empty. Routing is short and doesn't need reasoning anyway.
 SUPERVISOR_MODEL = "qwen3-nothink"
-supervisor_llm = ChatOllama(model=SUPERVISOR_MODEL, temperature=0)
+supervisor_llm = ChatOllama(model=SUPERVISOR_MODEL, temperature=0, num_ctx=NUM_CTX)
 
 
 def _pick_keyword(text: str) -> str | None:

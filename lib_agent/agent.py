@@ -12,7 +12,7 @@ from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import tools_condition
 from langgraph.types import Command, interrupt
 
-from config import MODEL
+from config import MODEL, NUM_CTX
 from tools.docs import search_documents
 from tools.files import read_file, write_file
 from tools.python_sandbox import run_python
@@ -34,7 +34,7 @@ TOOLS: list[BaseTool] = [
     run_python,
     search_documents,
 ]
-llm = ChatOllama(model=MODEL, temperature=0).bind_tools(TOOLS)
+llm = ChatOllama(model=MODEL, temperature=0, num_ctx=NUM_CTX).bind_tools(TOOLS)
 
 
 def call_model(state: MessagesState) -> dict:
