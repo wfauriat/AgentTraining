@@ -22,7 +22,7 @@ from langgraph.types import Command
 
 from config import TURN_TIMEOUT
 from observability import flush as flush_traces, make_callbacks
-from prompts import CHAT_SYSTEM
+from prompts import CHAT_SYSTEM, PERSONA_PATH, resolve_chat_system
 
 
 class TurnTimeout(Exception):
@@ -31,23 +31,8 @@ class TurnTimeout(Exception):
     each user decision)."""
 
 DB_PATH = Path(__file__).parent / "checkpoints.sqlite"
-PERSONA_PATH = Path(__file__).parent / "persona.txt"
-
-
-def _resolve_system_prompt() -> str:
-    """Return the active system prompt: persona.txt if present, else default.
-    Read once at chat-session start; /persona will reload it later."""
-    if PERSONA_PATH.exists():
-        try:
-            override = PERSONA_PATH.read_text(encoding="utf-8").strip()
-            if override:
-                return override
-        except Exception:
-            pass
-    return CHAT_SYSTEM
-
-
-SYSTEM = SystemMessage(content=_resolve_system_prompt())
+# Note: the active persona is resolved per agent turn inside agent.call_model
+# (not seeded once into state). /persona changes apply on the next message.
 # Worker node names in the multi-agent graph. When updates arrive from these
 # nodes, the AI message content was produced by an inner LLM call we never
 # saw at token level — print it here, since streaming missed it.
@@ -66,12 +51,17 @@ _SLASH_EXIT = "__SLASH_EXIT__"  # sentinel: exit the REPL
 def _slash_help() -> str:
     return "\n".join([
         "available slash commands:",
-        "  /help                 show this menu",
-        "  /facts                show persisted facts",
-        "  /forget <key>         delete a stored fact",
-        "  /threads              list checkpoint thread_ids",
-        "  /clear                wipe the current thread (start fresh next message)",
-        "  /quit  /exit  /q      leave the REPL",
+        "  /help                       show this menu",
+        "  /facts                      show persisted facts",
+        "  /forget <key>               delete a stored fact",
+        "  /threads                    list checkpoint thread_ids",
+        "  /persona                    show active system prompt",
+        "  /persona reset              restore the default persona",
+        "  /persona edit               multi-line edit (blank line ends)",
+        "  /persona load <path>        read persona from a file",
+        "  /persona <inline text>      one-line persona replacement",
+        "  /clear                      wipe the current thread (start fresh)",
+        "  /quit  /exit  /q            leave the REPL",
         "(more coming as the UX pass progresses)",
     ])
 
@@ -105,6 +95,81 @@ def _slash_forget(args: str) -> str:
     from tools.memory import forget as forget_tool
 
     return forget_tool.invoke({"key": args})
+
+
+def _slash_persona(args: str) -> str:
+    """
+    /persona              show active persona
+    /persona reset        delete persona.txt — back to prompts.CHAT_SYSTEM
+    /persona edit         multi-line entry; blank line ends, /cancel aborts
+    /persona load <path>  read alternate file; persist its contents to persona.txt
+    /persona <inline>     single-line replacement (anything else after /persona)
+    """
+    args = args.strip()
+
+    # Show current
+    if not args:
+        active = resolve_chat_system()
+        is_override = PERSONA_PATH.exists() and active != CHAT_SYSTEM
+        source = f"override → {PERSONA_PATH.name}" if is_override else "default → prompts.CHAT_SYSTEM"
+        # Indent body for readability since slash output is already indented.
+        body = "\n".join(f"    {ln}" for ln in active.splitlines())
+        return f"active persona [{source}]:\n{body}"
+
+    # Reset to default
+    if args.lower() == "reset":
+        if PERSONA_PATH.exists():
+            try:
+                PERSONA_PATH.unlink()
+                return "persona reset to default"
+            except Exception as e:
+                return f"[error: {e}]"
+        return "already at default (no persona.txt)"
+
+    # Multi-line interactive edit
+    if args.lower() == "edit":
+        print("  · enter persona text below. blank line ends, /cancel aborts.")
+        lines: list[str] = []
+        while True:
+            try:
+                line = input("    > ")
+            except EOFError:
+                return "[edit cancelled (EOF)]"
+            if line.strip().lower() == "/cancel":
+                return "[edit cancelled]"
+            if not line.strip():
+                break
+            lines.append(line)
+        if not lines:
+            return "no text entered; persona unchanged"
+        return _write_persona("\n".join(lines))
+
+    # Load from alternate path
+    if args.lower().startswith("load "):
+        path_str = args[5:].strip()
+        if not path_str:
+            return "usage: /persona load <path>"
+        path = Path(path_str).expanduser()
+        if not path.exists():
+            return f"[error: file not found — {path}]"
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            return f"[error reading {path}: {e}]"
+        if not content:
+            return f"[error: file is empty — {path}]"
+        return _write_persona(content) + f" (loaded from {path})"
+
+    # Inline single-line replacement
+    return _write_persona(args)
+
+
+def _write_persona(text: str) -> str:
+    try:
+        PERSONA_PATH.write_text(text.strip() + "\n", encoding="utf-8")
+        return f"persona updated ({len(text)} chars). takes effect on next message."
+    except Exception as e:
+        return f"[error writing persona: {e}]"
 
 
 def _slash_threads(config: RunnableConfig) -> str:
@@ -152,6 +217,8 @@ def _handle_slash(line: str, app, config: RunnableConfig):
         return _slash_forget(args)
     if head == "/threads":
         return _slash_threads(config)
+    if head == "/persona":
+        return _slash_persona(args)
     return f"unknown slash command: {head}. type /help"
 
 
@@ -333,10 +400,9 @@ def main() -> None:
                 print()
             continue  # next user prompt
 
-        new_msgs: list = []
-        if _is_thread_fresh(app, config):
-            new_msgs.append(SYSTEM)
-        new_msgs.append(HumanMessage(content=user_text))
+        # System prompt is no longer seeded into state; agent.call_model
+        # prepends a fresh one (active persona + facts + summary) per turn.
+        new_msgs: list = [HumanMessage(content=user_text)]
 
         # Interrupt-aware turn with a cooperative wall-clock cap.
         # The deadline resets after each HITL approval — user input time is

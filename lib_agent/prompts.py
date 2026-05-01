@@ -3,12 +3,32 @@
 # Why centralize:
 #   - One file to read to understand "what the agent thinks it is"
 #   - Easy diffs when iterating prompts
-#   - Clean dependency target for /persona hot-edit (chat.py overrides
-#     CHAT_SYSTEM at runtime via persona.txt)
+#   - Clean dependency target for /persona hot-edit (persona.txt overrides
+#     CHAT_SYSTEM at runtime; agent.call_model resolves it fresh every turn)
 #   - Future home for model-conditional variants (when a 2nd model lands)
 #
 # Tool docstrings are NOT here — they live with their @tool definitions
 # because they are part of the tool's schema contract, not free-form prose.
+
+from pathlib import Path
+
+# persona.txt: a hot-editable override for CHAT_SYSTEM. Resolved per turn so
+# /persona changes take effect on the next agent call without restarting.
+PERSONA_PATH = Path(__file__).parent / "persona.txt"
+
+
+def resolve_chat_system() -> str:
+    """Return the active CHAT system prompt. persona.txt wins if present and
+    non-empty; otherwise CHAT_SYSTEM. Read on every call so /persona changes
+    apply immediately."""
+    if PERSONA_PATH.exists():
+        try:
+            override = PERSONA_PATH.read_text(encoding="utf-8").strip()
+            if override:
+                return override
+        except Exception:
+            pass
+    return CHAT_SYSTEM
 
 # ── Single-agent / chat REPL default persona ─────────────────────────────
 # Replaceable at runtime: chat.py reads ./persona.txt if present and uses

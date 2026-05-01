@@ -30,7 +30,7 @@ from config import (
     SUMMARY_KEEP_TAIL,
     SUMMARY_MODEL,
 )
-from prompts import SUMMARIZER_SYSTEM
+from prompts import SUMMARIZER_SYSTEM, resolve_chat_system
 from tools.docs import search_documents
 from tools.files import (
     copy_file,
@@ -197,20 +197,24 @@ def prune_node(state: AgentState) -> dict:
 
 
 def call_model(state: AgentState) -> dict:
-    """Inject persistent facts and the rolling summary as a leading
-    SystemMessage so the model has context the messages list doesn't carry."""
-    msgs = state["messages"]
-    summary = state.get("summary", "")
+    """Build the LLM input by prepending a fresh SystemMessage built from:
+    (1) the active persona (resolved each call so /persona takes effect),
+    (2) persistent facts injection, and (3) the rolling summary.
+
+    Strips any pre-existing SystemMessage in state so the live persona is the
+    sole authoritative one — this also tolerates threads from earlier code
+    that seeded a SystemMessage into state."""
+    base_msgs = [m for m in state["messages"] if not isinstance(m, SystemMessage)]
+
+    parts: list[str] = [resolve_chat_system()]
     facts = render_facts()
-
-    extras: list[str] = []
     if facts:
-        extras.append(f"[Persistent facts]\n{facts}")
+        parts.append(f"[Persistent facts]\n{facts}")
+    summary = state.get("summary", "")
     if summary:
-        extras.append(f"[Earlier conversation summary]\n{summary}")
+        parts.append(f"[Earlier conversation summary]\n{summary}")
 
-    if extras:
-        msgs = [SystemMessage(content="\n\n".join(extras)), *msgs]
+    msgs = [SystemMessage(content="\n\n".join(parts)), *base_msgs]
     return {"messages": [llm.invoke(msgs)]}
 
 
