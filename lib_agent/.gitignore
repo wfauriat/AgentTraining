@@ -8,3 +8,5 @@ workspace/
 vector_db/
 eval/reports/
 facts.json
+persona.txt
+session_transcript.md
