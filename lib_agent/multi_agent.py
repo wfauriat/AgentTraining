@@ -21,7 +21,14 @@ from langgraph.prebuilt import tools_condition
 from agent import get_current_time, make_serial_tool_node
 from config import MODEL, NUM_CTX
 from tools.docs import search_documents
-from tools.files import read_file, write_file
+from tools.files import (
+    delete_file,
+    find_files,
+    list_directory,
+    make_directory,
+    read_file,
+    write_file,
+)
 from tools.python_sandbox import run_python
 from tools.web import web_fetch, web_search
 
@@ -65,7 +72,16 @@ RESEARCH_SYSTEM = (
     "returns to a supervisor that may delegate to another worker."
 )
 
-CODE_TOOLS = [get_current_time, run_python, read_file, write_file]
+CODE_TOOLS = [
+    get_current_time,
+    run_python,
+    read_file,
+    write_file,
+    list_directory,
+    make_directory,
+    find_files,
+    delete_file,
+]
 CODE_SYSTEM = (
     "You are the code_agent. Your tools: run_python (Docker sandbox), "
     "read_file, write_file (workspace), get_current_time.\n\n"

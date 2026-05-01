@@ -14,7 +14,14 @@ from langgraph.types import Command, interrupt
 
 from config import MODEL, NUM_CTX
 from tools.docs import search_documents
-from tools.files import read_file, write_file
+from tools.files import (
+    delete_file,
+    find_files,
+    list_directory,
+    make_directory,
+    read_file,
+    write_file,
+)
 from tools.python_sandbox import run_python
 from tools.web import web_fetch, web_search
 
@@ -29,6 +36,10 @@ TOOLS: list[BaseTool] = [
     get_current_time,
     read_file,
     write_file,
+    list_directory,
+    make_directory,
+    find_files,
+    delete_file,
     web_search,
     web_fetch,
     run_python,
@@ -43,7 +54,7 @@ def call_model(state: MessagesState) -> dict:
 
 # Tools that mutate the world or run code. Each call gates on a human
 # approval via interrupt() before the serial tool node executes it.
-DESTRUCTIVE_TOOLS: set[str] = {"write_file", "run_python"}
+DESTRUCTIVE_TOOLS: set[str] = {"write_file", "run_python", "delete_file"}
 
 _APPROVAL_YES = {"yes", "y", "true", "approve", "ok"}
 
