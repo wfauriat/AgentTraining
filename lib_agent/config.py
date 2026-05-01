@@ -33,4 +33,7 @@ TOP_K = 5
 # replaces it with a stored summary in state["summary"].
 PRUNE_THRESHOLD_TOKENS = 8000   # leave headroom under NUM_CTX (16384) for response + tool schemas
 SUMMARY_KEEP_TAIL = 6           # try to keep last N messages intact (boundary-aware)
-SUMMARY_MODEL = "qwen3-nothink" # fast, no reasoning tokens — well-suited to summarization
+# Use the same model family as MODEL so we don't trigger VRAM contention on a
+# single-GPU local setup. qwen3:8b emits thinking tokens that ChatOllama strips
+# from content; the summarizer prompt produces a plain response anyway.
+SUMMARY_MODEL = MODEL

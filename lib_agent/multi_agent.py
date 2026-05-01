@@ -104,10 +104,14 @@ WorkerChoice = Literal["research_agent", "code_agent", "FINISH"]
 _ROUTE_KEYWORDS: tuple[str, ...] = ("research_agent", "code_agent", "FINISH")
 
 
-# Use the no-thinking Qwen3 variant for supervisor decisions: thinking
-# tokens get stripped from content by ChatOllama, sometimes leaving the
-# message empty. Routing is short and doesn't need reasoning anyway.
-SUPERVISOR_MODEL = "qwen3-nothink"
+# Supervisor uses the SAME model as workers. Reason: on a single-GPU local
+# setup with VRAM that fits exactly one model + KV cache, any second model
+# triggers VRAM contention with keep_alive=-1, which blocks indefinitely.
+# Trade-off: qwen3:8b emits thinking tokens that ChatOllama strips, sometimes
+# leaving content empty — the keyword router + fallback in supervisor_node
+# already handle that. Net effect: occasional fallback to "research_agent"
+# on a parse miss, but no VRAM thrash and no 90s hangs.
+SUPERVISOR_MODEL = MODEL
 supervisor_llm = ChatOllama(
     model=SUPERVISOR_MODEL,
     temperature=0,

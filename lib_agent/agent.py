@@ -149,13 +149,24 @@ def prune_node(state: AgentState) -> dict:
 
     No-op when under threshold. Otherwise splits at a HumanMessage boundary,
     summarizes everything before it (incorporating any prior summary), and
-    emits RemoveMessage entries so the add_messages reducer drops them."""
+    emits RemoveMessage entries so the add_messages reducer drops them.
+
+    Prints a one-line trace to stdout when it actually summarizes — silent
+    no-ops would otherwise leave the user wondering whether prune ever fires."""
     msgs = state["messages"]
-    if _approx_tokens(msgs) <= PRUNE_THRESHOLD_TOKENS:
+    before_tokens = _approx_tokens(msgs)
+    if before_tokens <= PRUNE_THRESHOLD_TOKENS:
         return {}
 
-    to_summarize, _to_keep = _safe_split(msgs)
+    to_summarize, kept = _safe_split(msgs)
     if not to_summarize:
+        # Couldn't find a safe boundary; signal but don't summarize.
+        # This is informational — common when the tail is all
+        # tool_call/tool_result pairs without a HumanMessage break.
+        print(
+            f"\n  · prune skipped: {before_tokens} tokens but no safe "
+            f"HumanMessage boundary in last {SUMMARY_KEEP_TAIL} messages"
+        )
         return {}
 
     # Render the messages-to-summarize as a flat transcript inside one
@@ -193,6 +204,11 @@ def prune_node(state: AgentState) -> dict:
     new_summary = str(response.content).strip()
 
     removals = [RemoveMessage(id=m.id) for m in to_summarize if getattr(m, "id", None)]
+    after_tokens = _approx_tokens(kept) + (len(new_summary) // 4 + 4)
+    print(
+        f"\n  · context summarized: ~{before_tokens} → ~{after_tokens} tokens "
+        f"(dropped {len(removals)} messages, {len(new_summary)} chars of summary)"
+    )
     return {"messages": removals, "summary": new_summary}
 
 
@@ -330,7 +346,11 @@ if __name__ == "__main__":
         if system is not None:
             new_msgs.append(system)
         new_msgs.append(HumanMessage(content=user_text))
-        for step in app.stream({"messages": new_msgs}, config=config, stream_mode="updates"):
+        # Cast to AgentState shape for the type checker — at runtime LangGraph
+        # accepts any dict matching the TypedDict schema; only the static
+        # checker needs the named type.
+        state_in: AgentState = {"messages": new_msgs, "summary": ""}
+        for step in app.stream(state_in, config=config, stream_mode="updates"):
             for node_name, update in step.items():
                 print(f"\n── {node_name} ──")
                 for msg in update.get("messages", []):

@@ -224,9 +224,69 @@ def _handle_slash(line: str, app, config: RunnableConfig):
 
 def _is_thread_fresh(app, config: RunnableConfig) -> bool:
     """A thread is fresh when its checkpoint store has no messages.
-    Used to decide whether to prepend SYSTEM on the next turn."""
+    Used by the startup banner; per-turn seeding now happens in agent.call_model."""
     snap = app.get_state(config)
     return not snap.values.get("messages")
+
+
+# ── status bar + per-turn footer ─────────────────────────────────────────
+# Both pull from live state. Single source of truth for the token estimate
+# is agent._approx_tokens — same function the prune node uses to decide
+# when to summarize, so the status bar and the prune trigger never disagree.
+
+def _status_bar(app, config: RunnableConfig) -> str:
+    """Single-line context dashboard printed before each user prompt."""
+    from agent import _approx_tokens
+    from config import NUM_CTX
+    from tools.memory import load_facts
+
+    snap = app.get_state(config)
+    msgs = snap.values.get("messages", [])
+    summary = snap.values.get("summary", "")
+
+    ctx_tokens = _approx_tokens(msgs)
+    pct = int(100 * ctx_tokens / NUM_CTX) if NUM_CTX > 0 else 0
+    summary_marker = "✓" if summary else "—"
+    facts_count = len(load_facts())
+    thread = config["configurable"]["thread_id"]
+
+    return (
+        f"[ thread {thread}"
+        f" │ ctx {ctx_tokens}/{NUM_CTX} ({pct}%)"
+        f" │ summary {summary_marker}"
+        f" │ facts {facts_count} ]"
+    )
+
+
+def _turn_footer(
+    app,
+    config: RunnableConfig,
+    prior_ids: set,
+    elapsed_s: float,
+) -> str:
+    """Per-turn token + duration summary. Aggregates across all AI messages
+    added during the turn, identified by id-diff against a pre-turn snapshot.
+
+    Why id-diff and not a count: prune_node may RemoveMessage older entries
+    mid-turn, so a positional slice (`msgs[prior_count:]`) can miss
+    newly-added AI messages or include the wrong ones."""
+    snap = app.get_state(config)
+    msgs = snap.values.get("messages", [])
+
+    in_tok = out_tok = n_calls = 0
+    for m in msgs:
+        if not isinstance(m, AIMessage):
+            continue
+        mid = getattr(m, "id", None)
+        if mid in prior_ids:
+            continue
+        n_calls += 1
+        um = getattr(m, "usage_metadata", None) or {}
+        in_tok += um.get("input_tokens", 0)
+        out_tok += um.get("output_tokens", 0)
+
+    calls_suffix = f" ({n_calls} model calls)" if n_calls > 1 else ""
+    return f"↳ in {in_tok} tok · out {out_tok} tok · {elapsed_s:.1f}s{calls_suffix}"
 
 
 def _ask_approval(payload: Any) -> str:
@@ -277,7 +337,10 @@ def render_stream(stream_iter, deadline: float | None = None) -> None:
                 # Skip the supervisor's structured-output stream — that JSON
                 # is internal routing, not user-facing content.
                 node = (meta or {}).get("langgraph_node")
-                if node == "supervisor":
+                # Skip internal LLM streams that aren't user-facing replies:
+                #   - supervisor: routing decisions (multi-agent)
+                #   - prune:      summarizer LLM streaming, mid-turn
+                if node in ("supervisor", "prune"):
                     continue
                 if not streaming:
                     print("\nAssistant: ", end="", flush=True)
@@ -370,6 +433,9 @@ def main() -> None:
     print("Type /help for commands, /quit to exit. Resume later with: python chat.py --thread", thread_id, "\n")
 
     while True:
+        # Status bar before every prompt — gives instant visibility into
+        # ctx budget, summary state, fact count.
+        print(_status_bar(app, config))
         try:
             user_text = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -404,6 +470,14 @@ def main() -> None:
         # prepends a fresh one (active persona + facts + summary) per turn.
         new_msgs: list = [HumanMessage(content=user_text)]
 
+        # Snapshot AI message ids BEFORE the turn so the footer can compute
+        # deltas robustly even if prune_node removes older messages mid-turn.
+        _pre_msgs = app.get_state(config).values.get("messages", [])
+        prior_ids = {
+            getattr(m, "id", None) for m in _pre_msgs if isinstance(m, AIMessage)
+        }
+        turn_start = time.monotonic()
+
         # Interrupt-aware turn with a cooperative wall-clock cap.
         # The deadline resets after each HITL approval — user input time is
         # exogenous and shouldn't count against the agent's budget.
@@ -432,6 +506,11 @@ def main() -> None:
         except Exception as e:
             # Catch model timeouts, ollama errors, etc. so the REPL never dies.
             print(f"\n  · turn failed ({type(e).__name__}): {e}")
+
+        # Per-turn footer always prints, even on partial failure — useful
+        # for diagnosing where a slow turn spent its time.
+        elapsed = time.monotonic() - turn_start
+        print(f"  {_turn_footer(app, config, prior_ids, elapsed)}")
 
 
 if __name__ == "__main__":
