@@ -38,8 +38,14 @@ info:  ## show checkpoint db + phoenix status
 list-threads:  ## list checkpoint thread_ids
 	$(PY) -m admin list-threads
 
+list-facts:  ## list persisted facts (facts.json)
+	$(PY) -m admin list-facts
+
 purge-state:  ## drop the checkpoints.sqlite database
 	$(PY) -m admin purge-all --yes
+
+purge-facts:  ## drop facts.json
+	$(PY) -m admin purge-facts --yes
 
 purge-traces:  ## nuke phoenix traces (volume reset)
 	$(PY) -m admin purge-traces --yes
@@ -60,5 +66,5 @@ phoenix-logs:  ## tail the phoenix container logs
 install:  ## (re)install python dependencies into .venv
 	$(PIP) install -r requirements.txt
 
-.PHONY: help chat chat-multi eval eval-quick index info list-threads \
-        purge-state purge-traces phoenix-up phoenix-down phoenix-logs install
+.PHONY: help chat chat-multi eval eval-quick index info list-threads list-facts \
+        purge-state purge-facts purge-traces phoenix-up phoenix-down phoenix-logs install

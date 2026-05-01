@@ -18,7 +18,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import tools_condition
 
-from agent import get_current_time, make_serial_tool_node
+from agent import get_current_time, make_serial_tool_node, prune_node
 from config import MODEL, NUM_CTX
 from tools.docs import search_documents
 from tools.files import (
@@ -29,6 +29,7 @@ from tools.files import (
     read_file,
     write_file,
 )
+from tools.memory import forget, recall, remember
 from tools.python_sandbox import run_python
 from tools.web import web_fetch, web_search
 
@@ -60,7 +61,13 @@ def _build_worker(tools: list[BaseTool], system_prompt: str):
 
 # ── Worker definitions ────────────────────────────────────────────────────
 
-RESEARCH_TOOLS = [get_current_time, web_search, web_fetch, search_documents]
+RESEARCH_TOOLS = [
+    get_current_time,
+    web_search,
+    web_fetch,
+    search_documents,
+    recall,  # read-only access to persisted facts
+]
 RESEARCH_SYSTEM = (
     "You are the research_agent. Your tools: web_search, web_fetch, "
     "search_documents (local corpus), get_current_time.\n\n"
@@ -81,6 +88,9 @@ CODE_TOOLS = [
     make_directory,
     find_files,
     delete_file,
+    remember,
+    forget,
+    recall,
 ]
 CODE_SYSTEM = (
     "You are the code_agent. Your tools: run_python (Docker sandbox), "
@@ -223,6 +233,7 @@ class SupervisorState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     next: str
     supervisor_reason: str
+    summary: str  # populated by prune_node when the conversation grows
 
 
 def supervisor_node(state: SupervisorState) -> dict:
@@ -271,11 +282,18 @@ def _route(state: SupervisorState):
     return END if nxt in (None, "FINISH") else nxt
 
 
+# Topology:
+#   START → prune → supervisor → (research_agent | code_agent | END)
+#                                  ↑___________________________|
+# prune is shared with the single-agent graph (same prune_node, same
+# AgentState-compatible shape — both have `messages` and `summary`).
 graph = StateGraph(SupervisorState)
+graph.add_node("prune", prune_node)
 graph.add_node("supervisor", supervisor_node)
 graph.add_node("research_agent", _make_worker_node(research_agent, "research_agent"))
 graph.add_node("code_agent", _make_worker_node(code_agent, "code_agent"))
-graph.add_edge(START, "supervisor")
+graph.add_edge(START, "prune")
+graph.add_edge("prune", "supervisor")
 graph.add_conditional_edges("supervisor", _route)
 graph.add_edge("research_agent", "supervisor")
 graph.add_edge("code_agent", "supervisor")

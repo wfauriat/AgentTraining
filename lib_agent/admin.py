@@ -20,6 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 DB_PATH = ROOT / "checkpoints.sqlite"
+FACTS_PATH = ROOT / "facts.json"
 PHOENIX_COMPOSE = ROOT / "observability" / "docker-compose.phoenix.yml"
 
 
@@ -27,6 +28,16 @@ def _connect():
     if not DB_PATH.exists():
         return None
     return sqlite3.connect(str(DB_PATH))
+
+
+def _load_facts() -> dict:
+    import json
+    if not FACTS_PATH.exists():
+        return {}
+    try:
+        return json.loads(FACTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def cmd_info(_args) -> int:
@@ -40,12 +51,38 @@ def cmd_info(_args) -> int:
         ).fetchone()
         print(f"  threads: {rows[0]}")
 
+    facts = _load_facts()
+    print(f"\nfacts: {FACTS_PATH}  ({len(facts)} entries)")
+
     print(f"\nphoenix compose: {PHOENIX_COMPOSE}")
     res = subprocess.run(
         ["docker", "ps", "--filter", "name=phoenix", "--format", "{{.Status}}"],
         capture_output=True, text=True,
     )
     print(f"  container: {res.stdout.strip() or 'not running'}")
+    return 0
+
+
+def cmd_list_facts(_args) -> int:
+    facts = _load_facts()
+    if not facts:
+        print("(no facts stored)")
+        return 0
+    width = max(len(k) for k in facts) + 2
+    for k in sorted(facts):
+        print(f"{k:<{width}}{facts[k]}")
+    return 0
+
+
+def cmd_purge_facts(args) -> int:
+    if not args.yes:
+        print(f"refusing without --yes: would delete {FACTS_PATH}", file=sys.stderr)
+        return 1
+    if FACTS_PATH.exists():
+        os.remove(FACTS_PATH)
+        print(f"deleted {FACTS_PATH}")
+    else:
+        print("nothing to delete")
     return 0
 
 
@@ -114,13 +151,17 @@ def main() -> int:
     p = argparse.ArgumentParser(prog="admin", description="manage persisted state")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("info", help="show db + phoenix status")
+    sub.add_parser("info", help="show db + facts + phoenix status")
     sub.add_parser("list-threads", help="list thread_ids and checkpoint counts")
+    sub.add_parser("list-facts", help="dump persistent facts.json")
 
     sp = sub.add_parser("purge-thread", help="delete a single thread")
     sp.add_argument("thread_id")
 
     sp = sub.add_parser("purge-all", help="delete the entire checkpoint db")
+    sp.add_argument("--yes", action="store_true", help="confirm destructive action")
+
+    sp = sub.add_parser("purge-facts", help="delete the persistent facts.json")
     sp.add_argument("--yes", action="store_true", help="confirm destructive action")
 
     sp = sub.add_parser("purge-traces", help="nuke Phoenix data (volume reset)")
@@ -130,8 +171,10 @@ def main() -> int:
     handlers = {
         "info": cmd_info,
         "list-threads": cmd_list_threads,
+        "list-facts": cmd_list_facts,
         "purge-thread": cmd_purge_thread,
         "purge-all": cmd_purge_all,
+        "purge-facts": cmd_purge_facts,
         "purge-traces": cmd_purge_traces,
     }
     return handlers[args.cmd](args)

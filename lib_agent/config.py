@@ -17,3 +17,11 @@ TABLE_NAME = "course"
 CORPUS_PATH = "./corpus/biology.md"
 TARGET_CHUNK_CHARS = 2000
 TOP_K = 5
+
+# Context window management
+# When the message list exceeds PRUNE_THRESHOLD_TOKENS, the prune node
+# summarizes everything before the most recent HumanMessage boundary and
+# replaces it with a stored summary in state["summary"].
+PRUNE_THRESHOLD_TOKENS = 8000   # leave headroom under NUM_CTX (16384) for response + tool schemas
+SUMMARY_KEEP_TAIL = 6           # try to keep last N messages intact (boundary-aware)
+SUMMARY_MODEL = "qwen3-nothink" # fast, no reasoning tokens — well-suited to summarization

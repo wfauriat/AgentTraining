@@ -3,16 +3,31 @@
 
 from datetime import datetime
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from typing import Annotated, TypedDict
+
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.graph import START, StateGraph
+from langgraph.graph.message import add_messages
 from langgraph.prebuilt import tools_condition
 from langgraph.types import Command, interrupt
 
-from config import MODEL, NUM_CTX
+from config import (
+    MODEL,
+    NUM_CTX,
+    PRUNE_THRESHOLD_TOKENS,
+    SUMMARY_KEEP_TAIL,
+    SUMMARY_MODEL,
+)
 from tools.docs import search_documents
 from tools.files import (
     delete_file,
@@ -22,6 +37,7 @@ from tools.files import (
     read_file,
     write_file,
 )
+from tools.memory import forget, recall, remember, render_facts
 from tools.python_sandbox import run_python
 from tools.web import web_fetch, web_search
 
@@ -44,12 +60,142 @@ TOOLS: list[BaseTool] = [
     web_fetch,
     run_python,
     search_documents,
+    remember,
+    forget,
+    recall,
 ]
 llm = ChatOllama(model=MODEL, temperature=0, num_ctx=NUM_CTX).bind_tools(TOOLS)
+summarizer_llm = ChatOllama(model=SUMMARY_MODEL, temperature=0, num_ctx=NUM_CTX)
 
 
-def call_model(state: MessagesState) -> dict:
-    return {"messages": [llm.invoke(state["messages"])]}
+# ── State with rolling summary ───────────────────────────────────────────
+
+class AgentState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+    summary: str
+
+
+# ── Context-pruning helpers ──────────────────────────────────────────────
+
+def _approx_tokens(messages: list) -> int:
+    """1 token ≈ 4 chars heuristic. Fast and good enough for budget checks.
+    Adds a small per-message overhead for the role/structure boilerplate."""
+    total = 0
+    for m in messages:
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        total += len(content) // 4 + 4
+    return total
+
+
+def _safe_split(messages: list) -> tuple[list, list]:
+    """Return (to_summarize, to_keep).
+
+    The split MUST be at a HumanMessage boundary — splitting between an
+    AIMessage's tool_calls and its corresponding ToolMessages would leave
+    the model with orphaned tool_call_ids and is fatal at the next call.
+
+    Leading SystemMessages are always preserved at the front of to_keep.
+    """
+    head_system: list = []
+    rest: list = []
+    seen_non_system = False
+    for m in messages:
+        if not seen_non_system and isinstance(m, SystemMessage):
+            head_system.append(m)
+        else:
+            seen_non_system = True
+            rest.append(m)
+
+    if len(rest) <= SUMMARY_KEEP_TAIL:
+        return [], messages
+
+    # Find the earliest HumanMessage in the last SUMMARY_KEEP_TAIL window.
+    target_idx = max(0, len(rest) - SUMMARY_KEEP_TAIL)
+    boundary = None
+    for i in range(target_idx, len(rest)):
+        if isinstance(rest[i], HumanMessage):
+            boundary = i
+            break
+
+    if boundary is None or boundary == 0:
+        return [], messages
+
+    return rest[:boundary], head_system + rest[boundary:]
+
+
+def prune_node(state: AgentState) -> dict:
+    """Summarize older messages when the conversation exceeds the token budget.
+
+    No-op when under threshold. Otherwise splits at a HumanMessage boundary,
+    summarizes everything before it (incorporating any prior summary), and
+    emits RemoveMessage entries so the add_messages reducer drops them."""
+    msgs = state["messages"]
+    if _approx_tokens(msgs) <= PRUNE_THRESHOLD_TOKENS:
+        return {}
+
+    to_summarize, _to_keep = _safe_split(msgs)
+    if not to_summarize:
+        return {}
+
+    # Render the messages-to-summarize as a flat transcript inside one
+    # HumanMessage. If we pass them as alternating Human/AI roles the model
+    # often treats the last AI as a complete answer and emits nothing.
+    def _label(m) -> str:
+        cls = m.__class__.__name__.replace("Message", "")
+        if hasattr(m, "tool_calls") and m.tool_calls:
+            calls = "; ".join(f"{c['name']}({c['args']})" for c in m.tool_calls)
+            return f"{cls} [tool_calls: {calls}]"
+        if hasattr(m, "name") and m.name:  # ToolMessage
+            return f"{cls}({m.name})"
+        return cls
+
+    transcript_lines = [
+        f"{_label(m)}: {str(m.content)[:600]}" for m in to_summarize
+    ]
+    transcript = "\n".join(transcript_lines)
+
+    prior = state.get("summary", "")
+    prior_section = f"Prior summary:\n{prior}\n\n" if prior else ""
+
+    summary_input: list = [
+        SystemMessage(
+            content=(
+                "You write concise conversation summaries. Reply with ONLY the "
+                "summary text — no preamble, no formatting headers."
+            )
+        ),
+        HumanMessage(
+            content=(
+                f"{prior_section}Conversation transcript to summarize "
+                f"(<= 200 tokens output, keep facts/file paths/decisions/tool "
+                f"results, drop filler):\n\n{transcript}\n\nWrite the summary now."
+            )
+        ),
+    ]
+
+    response = summarizer_llm.invoke(summary_input)
+    new_summary = str(response.content).strip()
+
+    removals = [RemoveMessage(id=m.id) for m in to_summarize if getattr(m, "id", None)]
+    return {"messages": removals, "summary": new_summary}
+
+
+def call_model(state: AgentState) -> dict:
+    """Inject persistent facts and the rolling summary as a leading
+    SystemMessage so the model has context the messages list doesn't carry."""
+    msgs = state["messages"]
+    summary = state.get("summary", "")
+    facts = render_facts()
+
+    extras: list[str] = []
+    if facts:
+        extras.append(f"[Persistent facts]\n{facts}")
+    if summary:
+        extras.append(f"[Earlier conversation summary]\n{summary}")
+
+    if extras:
+        msgs = [SystemMessage(content="\n\n".join(extras)), *msgs]
+    return {"messages": [llm.invoke(msgs)]}
 
 
 # Tools that mutate the world or run code. Each call gates on a human
@@ -70,7 +216,7 @@ def make_serial_tool_node(tools: list[BaseTool]):
     """
     by_name = {t.name: t for t in tools}
 
-    def serial_tool_node(state: MessagesState) -> dict:
+    def serial_tool_node(state: AgentState) -> dict:
         last = state["messages"][-1]
         tool_calls = list(getattr(last, "tool_calls", []) or [])
 
@@ -127,12 +273,21 @@ def make_serial_tool_node(tools: list[BaseTool]):
 
 # Graph is built but not compiled at module level — chat.py wants a different
 # checkpointer. Callers compile with whichever saver fits their lifetime.
-graph = StateGraph(MessagesState)
+#
+# Topology with the prune node:
+#   START → prune → agent → (tools | END)
+#                    ↑________|
+#   tools → prune → agent ...
+# prune is a no-op when under PRUNE_THRESHOLD_TOKENS, so the cost is one
+# function call per super-step in the common case.
+graph = StateGraph(AgentState)
+graph.add_node("prune", prune_node)
 graph.add_node("agent", call_model)
 graph.add_node("tools", make_serial_tool_node(TOOLS))
-graph.add_edge(START, "agent")
+graph.add_edge(START, "prune")
+graph.add_edge("prune", "agent")
 graph.add_conditional_edges("agent", tools_condition)
-graph.add_edge("tools", "agent")
+graph.add_edge("tools", "prune")
 
 
 if __name__ == "__main__":
