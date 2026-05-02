@@ -1,0 +1,62 @@
+# Local self-hosted Langfuse v2 (single-image variant — Postgres + Langfuse).
+# v3 splits the server in two and adds clickhouse + redis + minio. For local
+# learning, v2 is the lighter mental model. Migrate to v3 later if needed.
+#
+# Bring up:   docker compose -f observability/docker-compose.langfuse.yml up -d
+# Tail logs:  docker compose -f observability/docker-compose.langfuse.yml logs -f langfuse
+# Tear down:  docker compose -f observability/docker-compose.langfuse.yml down
+#             (add -v to also drop the postgres volume if you want a clean slate)
+#
+# Open the UI at http://localhost:3000.  Login with the email/password under
+# LANGFUSE_INIT_USER_* below — first boot seeds the org/project/keys for you.
+
+services:
+  langfuse-db:
+    image: postgres:16
+    container_name: langfuse-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - langfuse-pg:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: langfuse
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-db:5432/postgres
+      NEXTAUTH_SECRET: dev-only-nextauth-secret
+      SALT: dev-only-salt
+      # 64-char hex (32 bytes). Local-only key; regenerate for real use:
+      #   openssl rand -hex 32
+      ENCRYPTION_KEY: 1979e3ee4c8191ec19f2922dc3158d4caa0147c63c406f713058aa89116b9cda
+      NEXTAUTH_URL: http://localhost:3000
+      TELEMETRY_ENABLED: "false"
+      # ── First-boot seed: org, project, user, and pre-set keys ─────────
+      # If the DB is fresh, Langfuse creates these on startup. After first
+      # boot they are persistent and these vars become no-ops.
+      LANGFUSE_INIT_ORG_ID: training-org
+      LANGFUSE_INIT_ORG_NAME: AgentTraining
+      LANGFUSE_INIT_PROJECT_ID: lib-agent
+      LANGFUSE_INIT_PROJECT_NAME: lib_agent
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-local-dev-public-key
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-local-dev-secret-key
+      LANGFUSE_INIT_USER_EMAIL: dev@local.test
+      LANGFUSE_INIT_USER_NAME: Local Dev
+      LANGFUSE_INIT_USER_PASSWORD: localdev123
+    restart: unless-stopped
+
+volumes:
+  langfuse-pg:
